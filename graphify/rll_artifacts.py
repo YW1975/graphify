@@ -55,6 +55,11 @@ KIND_MANIFEST = "gate-manifest"
 #: what buried an earlier graph of this repository under page and heading nodes.
 _EXCLUDED_SEGMENTS = ("docs", "node_modules", ".git", "site", "dist", "build")
 
+#: Stable, citer-independent `source_file` for reference stubs. A constant
+#: rather than "" because an empty string reads as a missing field to any
+#: downstream consumer that filters on it, while this is self-describing.
+REFERENT_SOURCE = "<rll-referent>"
+
 _PRESET_KEYS = frozenset({"requiredTiers", "optionalTiers", "perTierConfig", "changeType"})
 
 
@@ -174,7 +179,7 @@ class _Collector:
             # keeps its own citing file.
             self.nodes.append({
                 "id": nid, "label": label, "file_type": "concept",
-                # Empty, not this file: node dedup merges only nodes that are
+                # A constant, not this file: node dedup merges only nodes that are
                 # exactly equal, so recording the citer here makes a referent
                 # named by N files N non-equal nodes, which the collision pass
                 # then namespaces per file — observed as `e2e (tier)` splitting
@@ -182,7 +187,7 @@ class _Collector:
                 # fine. A referent belongs to no one file; the citing file is
                 # carried by each edge. The key is present because it is
                 # required, and constant so every citer mints the same node.
-                "source_file": "", "source_location": "L1",
+                "source_file": REFERENT_SOURCE, "source_location": "L1",
             })
         return nid
 
