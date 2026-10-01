@@ -521,6 +521,13 @@ def classify_file(path: Path) -> FileType | None:
     from graphify.manifest_ingest import is_package_manifest_path
     if is_package_manifest_path(path):
         return FileType.CODE
+    # Agent-instruction artifacts (skills, presets, personas, system prompts)
+    # are parsed deterministically for the same reason package manifests are:
+    # a .md skill would otherwise be a DOCUMENT needing LLM extraction, and
+    # --code-only would drop it. MODIFIED BY YW1975.
+    from graphify.rll_artifacts import is_rll_artifact_path
+    if is_rll_artifact_path(path):
+        return FileType.CODE
     # Compound extensions must be checked before simple suffix lookup
     if path.name.lower().endswith(".blade.php"):
         return FileType.CODE
