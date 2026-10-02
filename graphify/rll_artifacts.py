@@ -179,16 +179,18 @@ class _Collector:
             # keeps its own citing file.
             self.nodes.append({
                 "id": nid, "label": label, "file_type": "concept",
-                # A constant, not this file: node dedup merges only nodes that are
-                # exactly equal, so recording the citer here makes a referent
-                # named by N files N non-equal nodes, which the collision pass
-                # then namespaces per file — observed as `e2e (tier)` splitting
-                # into 5 path-prefixed nodes while single-citer tiers merged
-                # fine. A referent belongs to no one file; the citing file is
-                # carried by each edge. The key is present because it is
-                # required, and constant so every citer mints the same node.
-                "source_file": REFERENT_SOURCE, "source_location": "L1",
-            })
+                # NO `source_file`: upstream's own model for an entity a file
+                # merely names ("sourceless reference stubs are not
+                # definitions"). A constant placeholder path looked tidier and
+                # kept the schema quiet, but it is not a file the corpus
+                # contains — so the incremental rebuild collected every
+                # referent as "deleted or excluded source file" and took the
+                # invokes edges with it (42 command nodes → 0 on the second
+                # `graph sync`). Sourceless stubs are pruned only at degree 0,
+                # and a referent exists precisely because something points at
+                # it. The citing file is carried by each edge.
+                "source_location": "L1",
+})
         return nid
 
     def edge(self, src: str, tgt: str, relation: str, line: int,
@@ -228,7 +230,19 @@ def _skill_node(c: _Collector, name: str) -> str:
 def _extract_skill(c: _Collector, path: Path, text: str) -> None:
     fm, body_line = _split_frontmatter(text)
     name = _scalar(fm, "name") or path.parent.name
-    self_id = _skill_node(c, name)
+    # Its OWN node is a definition — it lives in THIS file, like a preset's or a
+    # persona's. Minting it as a referent gave it the `<rll-referent>` source,
+    # a path the corpus does not contain, so the incremental rebuild collected
+    # every skill node as "deleted or excluded source file" and took its edges
+    # with it. The first build was right and every later `graph sync` silently
+    # emptied the agent-instruction half of the graph, while the report said
+    # `skill: 0` — indistinguishable from a repo that has no skills.
+    #
+    # `concept`, not `code`, for the same reason the referent is: the pipeline
+    # namespaces a code node's id by its file, which would stop a citer's
+    # `rll-skill-<name>` from reaching this definition.
+    self_id = c.node(_make_id("rll-skill", name), f"{name} ({KIND_SKILL})",
+                     1, kind="concept")
 
     for cmd in _list_field(fm, "invokes"):
         c.edge(self_id, _command_node(c, cmd), "invokes", 1, declared=True)
