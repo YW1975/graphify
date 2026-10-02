@@ -2028,7 +2028,116 @@ def extract_js(path: Path) -> dict:
     if "error" not in result:
         _extract_js_rationale(path, result)
         _rescue_js_dynamic_imports(path, result)
+        _rescue_js_require_calls(path, result)
     return result
+
+
+def _rescue_js_require_calls(path: Path, result: dict) -> None:
+    """Recover calls made through a lazy ``require("./mod")`` (MODIFIED BY YW1975).
+
+    ``_require_imports_js`` records the module dependency for
+    ``const m = require('./mod')`` but no symbol binding, because at the
+    declaration it cannot know which members will be used. The later member
+    call ``m.fn()`` then resolves against this file's own label index, misses,
+    and is dropped — and the bare-expression form ``require('./mod').fn()`` is
+    not a declaration at all, so nothing sees it.
+
+    The result is that a function reached only this way looks uncalled.
+    Measured on the repository this was written for: 874 such call sites, with
+    the two files that hold the dispatch and the implementations accounting for
+    most of them, because lazy requires are how that codebase avoids circular
+    imports. A function on the live push path reported its own module and a
+    test as the only referents.
+
+    Textual, like the dynamic-import and Svelte/Vue rescues above and for the
+    same reason: the AST pass has already run and did not model these. The
+    specifier is resolved through ``_resolve_rescued_specifier`` so the target
+    id matches what the AST path would have produced, and the symbol id is
+    built the way ``_require_imports_js`` builds its accessor edges.
+
+    Edges anchor on the FILE node, not the enclosing function: that is the
+    granularity this pass can establish honestly from text, and it is the one
+    file-level traversal uses (#2584).
+    """
+    try:
+        import re as _re
+        src = path.read_text(encoding="utf-8", errors="replace")
+        if "require(" not in src:  # cheap bail
+            return
+        file_node_id = _make_id(str(path))
+        aliases = _load_tsconfig_aliases(path.parent)
+        base_url = _load_tsconfig_base_url(path.parent)
+        edges = result.setdefault("edges", [])
+        # Already-known (caller, callee) pairs so a call the AST pass DID
+        # resolve is not stated twice.
+        known = {(e.get("source"), e.get("target")) for e in edges}
+
+        def commented(at: int) -> bool:
+            line_start = src.rfind("\n", 0, at) + 1
+            return "//" in src[line_start:at]
+
+        def stem_for(raw: str):
+            resolution = _resolve_rescued_specifier(path, raw, aliases, base_url)
+            if resolution is None:
+                return None
+            _node_id, _stub_sf, resolved_file = resolution
+            return _file_stem(resolved_file) if resolved_file is not None else None
+
+        def emit(stem: str, member: str, at: int) -> None:
+            target = _make_id(stem, member)
+            if (file_node_id, target) in known:
+                return
+            known.add((file_node_id, target))
+            edges.append({
+                "source": file_node_id,
+                "target": target,
+                "relation": "calls",
+                # Provenance: recovered from text, at file granularity.
+                "context": "require-member-call",
+                "confidence": "EXTRACTED",
+                "source_file": str(path),
+                "source_location": f"L{src.count(chr(10), 0, at) + 1}",
+                "weight": 1.0,
+            })
+
+        SPEC = r"""require\s*\(\s*(?:'([^'\n]+)'|"([^"\n]+)")\s*\)"""
+
+        # 1. require('./m').fn(...)  — no declaration, nothing else sees it.
+        for m in _re.finditer(SPEC + r"""\s*\.\s*(\w+)\s*\(""", src):
+            if commented(m.start()):
+                continue
+            raw = m.group(1) or m.group(2)
+            stem = stem_for(raw) if raw else None
+            if stem:
+                emit(stem, m.group(3), m.start())
+
+        # 2. const m = require('./m')  …  m.fn(...)
+        #
+        # Binder names are collected first, then every member call on them is
+        # swept, because the call sites sit anywhere below the declaration.
+        bound: dict[str, str] = {}
+        for m in _re.finditer(
+            r"""(?:const|let|var)\s+(\w+)\s*=\s*""" + SPEC, src
+        ):
+            if commented(m.start()):
+                continue
+            raw = m.group(2) or m.group(3)
+            stem = stem_for(raw) if raw else None
+            if stem:
+                # A rebound name would make every later call ambiguous; keep the
+                # first binding and skip the name entirely if it is reused for a
+                # different module.
+                prev = bound.get(m.group(1))
+                bound[m.group(1)] = "" if (prev and prev != stem) else stem
+        for name, stem in bound.items():
+            if not stem:
+                continue
+            for m in _re.finditer(r"""(?<![\w.])""" + _re.escape(name) + r"""\s*\.\s*(\w+)\s*\(""", src):
+                if commented(m.start()):
+                    continue
+                emit(stem, m.group(1), m.start())
+    except Exception:
+        pass
 
 
 def _rescue_js_dynamic_imports(path: Path, result: dict) -> None:
