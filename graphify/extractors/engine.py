@@ -6057,6 +6057,10 @@ def _extract_generic(
         "function_declaration", "generator_function_declaration",
         "generator_function")
 
+    # Filled in just before the module-scope seed below; read inside walk_calls
+    # at call time, so the require attribution can tell module scope apart.
+    _module_nid_box: dict[str, str] = {}
+
     def walk_calls(
         node,
         caller_nid: str,
@@ -6096,7 +6100,18 @@ def _extract_generic(
         # dependency to the enclosing callable rather than silently dropping it.
         if (config.ts_module in ("tree_sitter_javascript", "tree_sitter_typescript")
                 and node.type in ("lexical_declaration", "variable_declaration")):
-            _require_imports_js(node, source, caller_nid, stem, edges, str_path)
+            # MODIFIED BY YW1975: a MODULE-scope require is a file-level
+            # dependency, so it is attributed to the file — not to the
+            # module-scope node that now owns module-level calls. Leaving it on
+            # that node puts the `imports` edge and the subsequent call on the
+            # same (source, target) pair, and the DiGraph keeps one: the call
+            # disappears. Inside a function body the dependency still belongs
+            # to the enclosing callable, as before.
+            _require_imports_js(
+                node, source,
+                file_nid if caller_nid == _module_nid_box.get("id") else caller_nid,
+                stem, edges, str_path,
+            )
 
         if node.type in config.call_types:
             # JS/TS dynamic imports: await import('./foo.js')
@@ -6983,6 +6998,69 @@ def _extract_generic(
     # seen_call_pairs, so a closure inside an initializer is not double-walked.
     for owner_nid, init_node in initializer_nodes:
         walk_calls(init_node, owner_nid)
+
+    # MODIFIED BY YW1975: seed the MODULE's own statements.
+    #
+    # The two loops above cover function bodies and field initializers. A
+    # statement at module scope is in neither, so a call written there was
+    # never reached — and that is where a CLI dispatches, where a framework
+    # registers routes, where a registry is populated. On the repository this
+    # was written for, the `switch (cmd)` at the top of its entry file holds
+    # 136 handler calls and the graph had none of them: ~130 commands looked
+    # like dead code, which is worse than an absent answer because it reads as
+    # a finding.
+    #
+    # Not a tree-sitter limit — the CST carries every call node — and not
+    # language-specific: minimal fixtures show Python and Go losing a
+    # module-level call the same way.
+    #
+    # Safe by construction, not by inspection: walk_calls returns at
+    # `config.function_boundary_types` before touching a body, so no function
+    # is re-entered, and `seen_call_pairs` dedups anything the loops above
+    # already emitted. Untracked closures it does descend (a module-level IIFE)
+    # are attributed here to the file, which is correct — their calls happen on
+    # import, with no enclosing callable to own them.
+    #
+    # The caller is a MODULE-SCOPE node, not the file node.
+    #
+    # Attributing it to the file cannot work: the clustered build path runs
+    # edges through a NetworkX DiGraph, which keeps ONE edge per (source,
+    # target) pair (see build.dedupe_edges). A module-level call to an imported
+    # symbol always has a sibling `file -imports-> symbol` edge, so the two
+    # compete for the same slot and the call is the one that disappears —
+    # silently, after being created and passing every resolution gate. Measured
+    # on the repository this was written for: the edge existed in the extractor
+    # output and was absent from graph.json.
+    #
+    # A separate node also states something truer. "cli.ts imports cmdAddContext"
+    # and "cli.ts's module-level code CALLS cmdAddContext" are different facts;
+    # one slot cannot hold both. Line provenance is unaffected — walk_calls
+    # stamps `source_location` from the call's own node.
+    _module_nid = _make_id(stem, "<module>")
+    _module_nid_box["id"] = _module_nid
+    if _module_nid not in seen_ids:
+        seen_ids.add(_module_nid)
+        nodes.append({
+            "id": _module_nid,
+            "label": "<module scope>",
+            "file_type": "code",
+            "source_file": str_path,
+            "source_location": "L1",
+        })
+        edges.append({
+            "source": file_nid, "target": _module_nid, "relation": "contains",
+            "context": "contains", "confidence": "EXTRACTED",
+            "source_file": str_path, "source_location": "L1", "weight": 1.0,
+        })
+    walk_calls(root, _module_nid)
+
+    # Drop the module-scope node again when nothing was attributed to it: most
+    # files have no module-level call, and a node per file whose only edge is
+    # `contains` is 1100+ nodes of noise on this repository.
+    if not any(e.get("source") == _module_nid for e in edges):
+        nodes[:] = [n for n in nodes if n.get("id") != _module_nid]
+        edges[:] = [e for e in edges if e.get("target") != _module_nid]
+        seen_ids.discard(_module_nid)
 
     # ── Event listener pass ───────────────────────────────────────────────────
     seen_listen_pairs: set[tuple[str, str]] = set()

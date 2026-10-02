@@ -8338,6 +8338,26 @@ def extract(
             sf_rel = sf_path
         nid_to_file_nid[n["id"]] = _file_node_id(sf_rel)
 
+    # MODIFIED BY YW1975: an import recorded on a node inside a file is
+    # evidence for that FILE.
+    #
+    # The index above is keyed by the edge's source, which is the file node only
+    # for a top-level `import`. A lazy `const { x } = require('./m')` is
+    # attributed to whatever owns it — the enclosing callable, or (now) the
+    # module-scope node — so its evidence was keyed under that node while the
+    # lookup below asks about the file. The import was then invisible, and the
+    # #1659 gate dropped a call the caller demonstrably imported. Folding each
+    # source into its containing file is what "the caller's file imported it"
+    # already meant.
+    for _src_nid, _syms in list(file_to_symbol_imports.items()):
+        _f = nid_to_file_nid.get(_src_nid)
+        if _f and _f != _src_nid:
+            file_to_symbol_imports.setdefault(_f, set()).update(_syms)
+    for _src_nid, _mods in list(file_to_module_imports.items()):
+        _f = nid_to_file_nid.get(_src_nid)
+        if _f and _f != _src_nid:
+            file_to_module_imports.setdefault(_f, set()).update(_mods)
+
     existing_pairs = {(e["source"], e["target"]) for e in all_edges}
     # Call-like pairs only, for the indirect_call dedup: an `imports` edge from a
     # file to the symbol it imports is EXPECTED and must not suppress an
@@ -8539,7 +8559,23 @@ def extract(
         # (INFERRED, callable-target-gated) and independent of import evidence.
         if not has_import_evidence and str(rc.get("source_file", "")).endswith(_JS_TS_CALL_SUFFIXES):
             continue
-        if tgt != caller and (caller, tgt) not in existing_pairs:
+        # MODIFIED BY YW1975: dedupe against CALL-like pairs, not every edge.
+        #
+        # `existing_pairs` holds every edge, so a file that imports a symbol
+        # already has `file -imports-> symbol` and a call from that same file
+        # was discarded as a duplicate. It never showed while callers were
+        # always functions — their pair differs from the file's — and became
+        # total once module-level statements got a caller, which is the file
+        # itself: on this repository all 136 dispatch calls were resolved,
+        # passed every gate with import evidence, and were then dropped here.
+        #
+        # `call_like_pairs` exists for exactly this distinction and carries the
+        # reasoning already: "an `imports` edge from a file to the symbol it
+        # imports is EXPECTED and must not suppress an indirect_call to that
+        # same symbol". That applies verbatim to a direct call; only the
+        # indirect path had been switched over.
+        if tgt != caller and (caller, tgt) not in call_like_pairs:
+            call_like_pairs.add((caller, tgt))
             existing_pairs.add((caller, tgt))
             # Promote to EXTRACTED when there's a direct import edge from the
             # caller's file pointing at either the callee symbol itself or the

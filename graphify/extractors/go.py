@@ -549,6 +549,31 @@ def extract_go(path: Path) -> dict:
     for caller_nid, body_node in function_bodies:
         walk_calls(body_node, caller_nid)
 
+    # MODIFIED BY YW1975: seed the file's own top-level statements.
+    #
+    # Package-level work — `var x = f()`, an `init`-adjacent initializer — is in
+    # no function body, so its calls were never reached and the callee looked
+    # unreferenced. walk_calls returns at function_declaration /
+    # method_declaration before entering a body, so nothing is re-walked; the
+    # caller is the file, which is what a package-level statement belongs to.
+    _module_nid = _make_id(stem, "<module>")
+    if _module_nid not in seen_ids:
+        seen_ids.add(_module_nid)
+        nodes.append({"id": _module_nid, "label": "<module scope>", "file_type": "code",
+                      "source_file": str(path), "source_location": "L1"})
+        edges.append({"source": file_nid, "target": _module_nid, "relation": "contains",
+                      "context": "contains", "confidence": "EXTRACTED",
+                      "source_file": str(path), "source_location": "L1", "weight": 1.0})
+    walk_calls(root, _module_nid)
+
+    # Drop the module-scope node again when nothing was attributed to it: most
+    # files have no module-level call, and a node per file whose only edge is
+    # `contains` is 1100+ nodes of noise on this repository.
+    if not any(e.get("source") == _module_nid for e in edges):
+        nodes[:] = [n for n in nodes if n.get("id") != _module_nid]
+        edges[:] = [e for e in edges if e.get("target") != _module_nid]
+        seen_ids.discard(_module_nid)
+
     valid_ids = seen_ids
     clean_edges = []
     for edge in edges:
