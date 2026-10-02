@@ -56,11 +56,6 @@ KIND_POLICY = "policy"
 #: what buried an earlier graph of this repository under page and heading nodes.
 _EXCLUDED_SEGMENTS = ("docs", "node_modules", ".git", "site", "dist", "build")
 
-#: Stable, citer-independent `source_file` for reference stubs. A constant
-#: rather than "" because an empty string reads as a missing field to any
-#: downstream consumer that filters on it, while this is self-describing.
-REFERENT_SOURCE = "<rll-referent>"
-
 _PRESET_KEYS = frozenset({"requiredTiers", "optionalTiers", "perTierConfig", "changeType"})
 
 
