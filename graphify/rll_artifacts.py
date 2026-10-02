@@ -48,6 +48,7 @@ KIND_PRESET = "preset"
 KIND_PERSONA = "persona"
 KIND_PROMPT = "system-prompt"
 KIND_MANIFEST = "gate-manifest"
+KIND_POLICY = "policy"
 
 #: Directory segments that never hold agent-instruction artifacts even when a
 #: filename matches. `docs/` is excluded by design: design documents are prose
@@ -85,6 +86,17 @@ def artifact_kind(path: Path) -> str | None:
         return KIND_SKILL
     if name == "gate-manifest.json":
         return KIND_MANIFEST
+    # A policy record: the authored source of the role documents an agent reads.
+    # `role-doc.py`'s equivalent reads these 9 declared fields and composes
+    # `.rll/roles/*.md` from them, so the rules themselves were the one part of
+    # the instruction surface absent from the graph — it could say which skill
+    # invokes which command while the gate policy was invisible.
+    #
+    # Only the `.json` is classified. Its paired `.md` is the prose body, named
+    # by `body_source`; it declares nothing to parse, so promoting it would add
+    # a node whose content no extractor can honestly read.
+    if path.suffix == ".json" and "policies" in segs:
+        return KIND_POLICY
     if path.suffix == ".json" and "presets" in segs:
         return KIND_PRESET
     if path.suffix == ".md" and "roles" in segs:
@@ -335,6 +347,55 @@ def _extract_persona_or_prompt(c: _Collector, path: Path, text: str, kind: str) 
                line, declared=True)
 
 
+def _extract_policy(c: _Collector, path: Path, text: str) -> None:
+    """A policy record. Every edge below comes from a declared field.
+
+    Schema is uniform across the shipped records (9 fields, all present), which
+    is why this needs no guessing: `applies_to` names seats, `destination` names
+    the composed document, `ids` name the rules, `body_source` names the prose.
+    """
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        return
+    if not isinstance(obj, dict) or "site_key" not in obj:
+        return
+    title = obj.get("title") or obj.get("site_key") or path.stem
+    self_id = c.node(_make_id("rll-policy", _posix(path)), f"{title} ({KIND_POLICY})")
+
+    dest = obj.get("destination")
+    if isinstance(dest, str) and dest:
+        # Answers "which records compose the document this agent actually
+        # reads" — the question the generated file cannot answer about itself.
+        c.edge(self_id, c.referent(_make_id("rll-doc", dest), dest),
+               "composes_into", 1, declared=True)
+
+    for seat in obj.get("applies_to") or []:
+        if isinstance(seat, str) and seat:
+            # A seat hub keyed by NAME, deliberately not the persona FILE node
+            # (which is keyed by path): these records say "ralph", not which
+            # file. Collapsing every policy for a seat onto one node is the
+            # useful traversal; claiming it is the same node as the persona
+            # document would be a join nothing declared.
+            c.edge(self_id, c.referent(_make_id("rll-seat", seat), f"{seat} (seat)"),
+                   "applies_to", 1, declared=True)
+
+    for rule in obj.get("ids") or []:
+        if isinstance(rule, str) and rule:
+            c.edge(self_id, c.referent(_make_id("rll-rule", rule), f"{rule} (rule)"),
+                   "defines_rule", 1, declared=True)
+
+    body = obj.get("body_source")
+    if isinstance(body, str) and body:
+        c.edge(self_id, c.referent(_make_id("rll-doc", body), body),
+               "body_in", 1, declared=True)
+
+    # `tier` is NOT minted as a tier referent. These values ("policies",
+    # "core") name a section of a role document; the tier nodes elsewhere in
+    # this graph are TEST tiers. One shared label would merge two unrelated
+    # things into one node and make both traversals wrong.
+
+
 def extract_rll_artifact(path: Path) -> dict:
     """Extract declarations and referents from an agent-instruction artifact."""
     kind = artifact_kind(path)
@@ -352,6 +413,8 @@ def extract_rll_artifact(path: Path) -> dict:
         _extract_preset(c, path, text)
     elif kind == KIND_MANIFEST:
         _extract_manifest(c, path, text)
+    elif kind == KIND_POLICY:
+        _extract_policy(c, path, text)
     else:
         _extract_persona_or_prompt(c, path, text, kind)
     return {"nodes": c.nodes, "edges": c.edges}
