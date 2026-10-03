@@ -1,4 +1,4 @@
-# Modified by the RLL project (2026-10): record each callable's line range (source_range); create test-case nodes for describe/it/test.
+# Modified by the RLL project (2026-10): record callable line ranges, test-case nodes, CLI-invocation facts; keep a module-scope node whose calls are all cross-file.
 # Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
 """engine — moved verbatim from graphify/extract.py."""
 from __future__ import annotations
@@ -6991,7 +6991,7 @@ def _extract_generic(
     # here, before the tracked-body set is frozen).
     if config.ts_module in ("tree_sitter_javascript", "tree_sitter_typescript"):
         from graphify.rll_granularity import js_collect_test_cases
-        js_collect_test_cases(
+        _rll_case_ids, _rll_case_bodies = js_collect_test_cases(
             root, source, stem=stem, str_path=str_path, file_nid=file_nid,
             nodes=nodes, edges=edges, seen_ids=seen_ids,
             function_bodies=function_bodies,
@@ -6999,6 +6999,8 @@ def _extract_generic(
             local_names_of=_js_local_bound_names,
             direct_lexical_names_of=_js_direct_lexical_names,
         )
+    else:
+        _rll_case_ids, _rll_case_bodies = [], set()
     _tracked_body_ids.update(b for _, b in function_bodies)
 
     # Body ids are unique (one language per file), so the Java (flat) and C#
@@ -7077,7 +7079,11 @@ def _extract_generic(
     # Drop the module-scope node again when nothing was attributed to it: most
     # files have no module-level call, and a node per file whose only edge is
     # `contains` is 1100+ nodes of noise on this repository.
-    if not any(e.get("source") == _module_nid for e in edges):
+    # RLL: a module whose top-level calls all go to IMPORTED symbols has none
+    # in `edges` yet — they sit in raw_calls until the cross-file pass — and
+    # dropping its node left those calls resolving from a dangling id.
+    if not any(e.get("source") == _module_nid for e in edges) and not any(
+            rc.get("caller_nid") == _module_nid for rc in raw_calls):
         nodes[:] = [n for n in nodes if n.get("id") != _module_nid]
         edges[:] = [e for e in edges if e.get("target") != _module_nid]
         seen_ids.discard(_module_nid)
@@ -7157,6 +7163,17 @@ def _extract_generic(
                 _scan_js_module_dispatch(c)
 
         _scan_js_module_dispatch(root)
+
+    # RLL: syntactic facts for the corpus-level CLI-invocation pass (spawn
+    # sites, call-site arguments, string-switch dispatch tables).
+    if config.ts_module in ("tree_sitter_javascript", "tree_sitter_typescript"):
+        from graphify.rll_granularity import js_collect_cli_facts
+        js_collect_cli_facts(
+            root, source, function_bodies=function_bodies, nodes=nodes,
+            file_nid=file_nid,
+            module_nid=_module_nid if _module_nid in seen_ids else None,
+            case_bodies=_rll_case_bodies,
+        )
 
     # ── Clean edges ───────────────────────────────────────────────────────────
     valid_ids = seen_ids

@@ -1,4 +1,4 @@
-# Modified by the RLL project (2026-10): tag every node with a role; keep test-case nodes out of call resolution.
+# Modified by the RLL project (2026-10): tag every node with a role; keep test-case nodes out of call resolution; resolve CLI subprocess launches to command handlers.
 # Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
 """Deterministic structural extraction from source code using tree-sitter. Outputs nodes+edges dicts."""
 from __future__ import annotations
@@ -8856,8 +8856,15 @@ def extract(
             _item["definition_file"] = PurePath(_df).as_posix()
 
     # RLL: product / test-case / test-helper / script / doc on every node.
-    from graphify.rll_granularity import assign_roles
+    from graphify.rll_granularity import assign_roles, resolve_cli_invocations
     assign_roles(all_nodes)
+    # RLL: test -> command-handler edges for CLI subprocess launches. Runs on the
+    # final ids; roles first, so handler lookup can prefer product code.
+    resolve_cli_invocations(
+        all_nodes, all_edges,
+        context_nodes=resolution_context_nodes or (),
+        context_edges=resolution_context_edges or (),
+    )
 
     return {
         "nodes": all_nodes,

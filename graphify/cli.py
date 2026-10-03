@@ -1,3 +1,5 @@
+# Modified by the RLL project (2026-10): forward the RLL CLI-invocation markers as incremental resolution context.
+# Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
 """graphify command dispatch — every non-install subcommand.
 
 Extracted verbatim from __main__.main(); __main__ now calls dispatch_command(cmd)
@@ -3867,6 +3869,9 @@ def dispatch_command(cmd: str) -> None:
                         # these markers cannot be reconstructed from labels.
                         for _marker in (
                             "_callable", "_callable_class", "_elixir_module",
+                            # RLL: CLI-invocation summaries / dispatch tables
+                            "_rll_cli_summary", "_rll_cli_params", "_rll_dispatch",
+                            "_rll_cli_consts",
                             "_rust_impl_key", "_rust_declaration_count",
                         ):
                             if _node.get(_marker):

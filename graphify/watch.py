@@ -1,3 +1,5 @@
+# Modified by the RLL project (2026-10): forward the RLL CLI-invocation markers as incremental resolution context.
+# Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
 # monitor a folder and auto-trigger --update when files change
 from __future__ import annotations
 import contextlib
@@ -1767,6 +1769,9 @@ def _rebuild_code(
                     # Rust impl identity connects alpha-renamed generic blocks.
                     for marker in (
                         "_callable", "_callable_class", "_elixir_module",
+                            # RLL: CLI-invocation summaries / dispatch tables
+                            "_rll_cli_summary", "_rll_cli_params", "_rll_dispatch",
+                            "_rll_cli_consts",
                         "_rust_impl_key", "_rust_declaration_count",
                     ):
                         if node.get(marker):
