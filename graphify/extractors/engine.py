@@ -1,3 +1,5 @@
+# Modified by the RLL project (2026-10): record each callable's line range (source_range).
+# Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
 """engine — moved verbatim from graphify/extract.py."""
 from __future__ import annotations
 
@@ -3663,6 +3665,9 @@ def _extract_generic(
     ruby_lexical_scopes: list[str] = []
     scope_stack: list[str] = []
     function_bodies: list[tuple[str, object]] = []
+    # RLL: the defining AST node of each function / method / class nid, so the
+    # node can carry its full line range (``source_range``), not just its start.
+    def_nodes: dict[str, object] = {}
     # nids of function / method / class definitions in this file. The indirect-
     # dispatch guard (Python) resolves a call-argument identifier to an edge only
     # when it names one of these callable defs — never an arbitrary same-named
@@ -3948,6 +3953,7 @@ def _extract_generic(
                     ):
                         metadata["ruby_lookup_unsafe"] = True
             add_node(class_nid, class_name, line, metadata=metadata)
+            def_nodes.setdefault(class_nid, node)  # RLL: range of the class
             if config.ts_module == "tree_sitter_ruby" and metadata:
                 # Reopened declarations collapse onto the same file-local id;
                 # merge fail-closed markers that add_node intentionally skips.
@@ -5555,6 +5561,7 @@ def _extract_generic(
                 if config.ts_module == "tree_sitter_c_sharp" and parent_class_nid:
                     csharp_method_scopes[id(body)] = (node, parent_class_nid)
                 function_bodies.append((func_nid, body))
+                def_nodes.setdefault(func_nid, node)  # RLL: range of the def
                 if config.ts_module in (
                     "tree_sitter_javascript", "tree_sitter_typescript"
                 ):
@@ -7198,6 +7205,9 @@ def _extract_generic(
         _pkg = _kotlin_package_name(root, source)
         if _pkg:
             result["kotlin_package"] = _pkg
+    # RLL: first..last line of every callable / class, so a diff hunk maps to it.
+    from graphify.rll_granularity import annotate_source_ranges
+    annotate_source_ranges(nodes, def_nodes, function_bodies, (file_nid, _module_nid))
     if callable_def_nids:
         # Mark function / method / class defs with a `_callable` attribute so the
         # cross-file indirect_call pass can resolve a by-name callback only to a real

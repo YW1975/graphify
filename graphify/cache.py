@@ -1,3 +1,5 @@
+# Modified by the RLL project (2026-10): bump the AST cache schema for the RLL graph-granularity fields.
+# Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
 # per-file extraction cache - skip unchanged files on re-run
 from __future__ import annotations
 
@@ -36,7 +38,7 @@ except Exception:
     _EXTRACTOR_VERSION = "unknown"
 
 # Bump when AST cache-key semantics change independently of the package version.
-_AST_CACHE_SCHEMA = 4  # Rust generic-impl identity markers + Terraform block attributes.
+_AST_CACHE_SCHEMA = 5  # RLL: source_range, test-case nodes, CLI-invocation facts.
 
 # Version dirs already swept this process — cleanup runs once per (base, version).
 _cleaned_ast_dirs: set[str] = set()
