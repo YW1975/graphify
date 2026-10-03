@@ -1,4 +1,4 @@
-# Modified by the RLL project (2026-10): test-case nodes are never type-like rewire targets.
+# Modified by the RLL project (2026-10): test-case nodes are never type-like rewire targets; imports through a re-export barrel are repointed to the definition.
 # Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
 """resolution — moved verbatim from graphify/extract.py."""
 from __future__ import annotations
@@ -1470,6 +1470,12 @@ def _apply_symbol_resolution_facts(
                     edge["target_file"] = str(path_by_resolved.get(origin[0], origin[0]))
             break
 
+    # RLL: the structural extractor points `import { x } from './barrel'` at the
+    # barrel's own `x` (a re-export SITE, no node of its own) whenever the name
+    # is re-exported rather than declared there. The resolved edge to the
+    # definition is added below; repoint the site edge onto the definition too,
+    # so no edge lands on a re-export site (it used to become a phantom stub).
+    site_retarget: dict[tuple[str, str, str], str] = {}
     for import_fact in facts.imports:
         source_id = source_file_id.get(_resolve_cached(import_fact.file_path))
         if source_id is None:
@@ -1481,6 +1487,13 @@ def _apply_symbol_resolution_facts(
         target_id = symbol_nodes.get((origin_path, origin_symbol))
         if target_id is None:
             continue
+        if origin_path != _resolve_cached(import_fact.target_path) and len(
+                exported_candidates((_resolve_cached(import_fact.target_path),
+                                     import_fact.imported_name), frozenset())[0]) == 1:
+            # only an UNAMBIGUOUS chain: a barrel re-exporting one name from two
+            # modules stays unresolved rather than guessing (#2034 follow-up)
+            site_retarget[(source_id, f"L{import_fact.line}",
+                           _make_id(import_fact.imported_name))] = target_id
         add_edge(
             source_id,
             target_id,
@@ -1489,6 +1502,18 @@ def _apply_symbol_resolution_facts(
             import_fact.line,
             import_fact.file_path,
         )
+    if site_retarget:
+        for edge in edges:
+            if edge.get("relation") != "imports" or edge.get("target") in owned_ids:
+                continue
+            tgt = str(edge.get("target"))
+            loc = str(edge.get("source_location", ""))
+            src = str(edge.get("source"))
+            for (s_id, s_loc, name), new_target in site_retarget.items():
+                if s_id == src and s_loc == loc and (tgt == name or tgt.endswith("_" + name)):
+                    edge["target"] = new_target
+                    edge["resolved_through_reexport"] = True
+                    break
 
     # #1146: emit file-to-file imports_from edges for package-form submodule imports.
     # #3777: retract provisional `imports_from` AST edges whose package ID coincided
