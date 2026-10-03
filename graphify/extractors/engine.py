@@ -2452,8 +2452,10 @@ def _js_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: str,
                    callable_def_nids: set | None = None,
                    local_bound_names: dict | None = None,
                    closure_locals_by_body: dict | None = None,
-                   config=None) -> bool:
+                   config=None, nid_of=None) -> bool:
     """Handle lexical_declaration (arrow functions, CJS requires, module-level const literals) for JS/TS. Returns True if handled."""
+    if nid_of is None:
+        nid_of = lambda plain, _name: plain  # noqa: E731
     # CommonJS / prototype member assignments whose value is a function:
     #   exports.X = () => {}     → file-contained function  X()
     #   module.exports.X = fn    → file-contained function  X()
@@ -2623,7 +2625,7 @@ def _js_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: str,
                             # leak the scan path (#1899); skip it (no graph signal).
                             if not normalize_id(func_name):
                                 continue
-                            func_nid = _make_id(stem, func_name)
+                            func_nid = nid_of(_make_id(stem, func_name), func_name)
                             add_node_fn(func_nid, f"{func_name}()", line)
                             add_edge_fn(file_nid, func_nid, "contains", line)
                             if callable_def_nids is not None:
@@ -2718,7 +2720,7 @@ def _js_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: str,
                         elif name_node:
                             const_name = _read_text(name_node, source)
                             line = child.start_point[0] + 1
-                            const_nid = _make_id(stem, const_name)
+                            const_nid = nid_of(_make_id(stem, const_name), const_name)
                             add_node_fn(const_nid, const_name, line)
                             add_edge_fn(file_nid, const_nid, "contains", line)
                             const_found = True
@@ -3749,6 +3751,17 @@ def _extract_generic(
     python_underscore_groups: dict[str, set[str]] = {}
     if config.ts_module == "tree_sitter_python":
         python_underscore_groups = _python_pre_scan_underscore_collisions(root, source, stem)
+    # RLL: JS/TS top-level names that differ only in case share one id.
+    js_case_groups: dict[str, dict[str, int]] = {}
+    if config.ts_module in ("tree_sitter_javascript", "tree_sitter_typescript"):
+        from graphify.rll_granularity import js_pre_scan_case_collisions
+        js_case_groups = js_pre_scan_case_collisions(root, source, stem, _make_id)
+
+    def js_nid(plain_nid: str, name: str) -> str:
+        if not js_case_groups:
+            return plain_nid
+        from graphify.rll_granularity import js_salted_nid
+        return js_salted_nid(plain_nid, name, js_case_groups, _make_id)
 
     def add_node(nid: str, label: str, line: int, *, node_type: str | None = None,
                  metadata: dict | None = None) -> None:
@@ -3913,6 +3926,8 @@ def _extract_generic(
                 ruby_segments = class_name.split("::")
                 class_name = "::".join(ruby_namespace + ruby_segments)
             class_nid = _make_id(stem, ".".join(namespace_stack), class_name)
+            if not namespace_stack and not parent_class_nid:
+                class_nid = js_nid(class_nid, class_name)
             line = node.start_point[0] + 1
             metadata = None
             ruby_reopened = (
@@ -5202,6 +5217,7 @@ def _extract_generic(
                     func_nid = _python_underscore_salted_nid(
                         func_nid, sanitized_name, python_underscore_groups
                     )
+                func_nid = js_nid(func_nid, sanitized_name)
                 add_node(func_nid, f"{func_name}()", line)
                 add_edge(file_nid, func_nid, "contains", line)
             callable_def_nids.add(func_nid)  # function / method def is callable
@@ -5678,7 +5694,8 @@ def _extract_generic(
                               nodes, edges, seen_ids, function_bodies,
                               parent_class_nid, add_node, add_edge,
                               callable_def_nids, local_bound_names,
-                              closure_locals_by_body, config=config):
+                              closure_locals_by_body, config=config,
+                              nid_of=js_nid):
                 return
 
         # TS enum members, and namespace / module containers

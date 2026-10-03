@@ -1622,3 +1622,63 @@ def resolve_cli_invocations(
         })
     edges.extend(emitted.values())
     return stats
+
+
+# ── 6. Case-only id collisions (JS / TS) ─────────────────────────────────────
+#
+# make_id case-folds, so `interface WorktreeFingerprint` and `function
+# worktreeFingerprint()` in one file mint the same id and add_node silently
+# drops whichever is walked second. Pre-scan the file's top-level declarations;
+# in a group of DISTINCT names sharing one id, the unique highest-priority one
+# (callable > class > other value > type-only) keeps the plain id — that is
+# what calls and value imports target — and every other member gets a stable
+# name-derived salt. No unique winner: all are salted (order never matters).
+
+_DECL_PRIORITY = {
+    "function_declaration": 3, "generator_function_declaration": 3,
+    "class_declaration": 2, "abstract_class_declaration": 2,
+    "enum_declaration": 1, "interface_declaration": 0, "type_alias_declaration": 0,
+}
+
+
+def js_pre_scan_case_collisions(root, source: bytes, stem: str, make_id) -> dict[str, dict[str, int]]:
+    groups: dict[str, dict[str, int]] = {}
+
+    def record(name: str, prio: int) -> None:
+        if not name:
+            return
+        g = groups.setdefault(make_id(stem, name), {})
+        g[name] = max(prio, g.get(name, -1))
+
+    for st in root.named_children:
+        decl = st
+        if st.type == "export_statement":
+            decl = next((c for c in st.named_children
+                         if c.type in _DECL_PRIORITY or c.type in ("lexical_declaration", "variable_declaration")), None)
+            if decl is None:
+                continue
+        if decl.type in _DECL_PRIORITY:
+            nm = decl.child_by_field_name("name")
+            if nm is not None:
+                record(_text(nm, source), _DECL_PRIORITY[decl.type])
+        elif decl.type in ("lexical_declaration", "variable_declaration"):
+            for d in decl.named_children:
+                if d.type != "variable_declarator":
+                    continue
+                nm = d.child_by_field_name("name")
+                val = d.child_by_field_name("value")
+                if nm is not None and nm.type == "identifier":
+                    record(_text(nm, source), 3 if val is not None and val.type in _JS_FN_TYPES else 1)
+    return {nid: names for nid, names in groups.items() if len(names) >= 2}
+
+
+def js_salted_nid(plain_nid: str, name: str, groups: dict[str, dict[str, int]], make_id) -> str:
+    names = groups.get(plain_nid)
+    if not names or name not in names:
+        return plain_nid
+    top = max(names.values())
+    winners = [n for n, p in names.items() if p == top]
+    if len(winners) == 1 and winners[0] == name:
+        return plain_nid
+    import hashlib
+    return make_id(plain_nid, hashlib.sha1(name.encode("utf-8")).hexdigest()[:6])
