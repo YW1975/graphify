@@ -5221,6 +5221,7 @@ def _extract_generic(
                 add_node(func_nid, f"{func_name}()", line)
                 add_edge(file_nid, func_nid, "contains", line)
             callable_def_nids.add(func_nid)  # function / method def is callable
+            def_nodes.setdefault(func_nid, node)  # RLL: range (also bodiless signatures)
             if config.ts_module == "tree_sitter_python":
                 local_bound_names[func_nid] = _python_local_bound_names(node, source)
             elif config.ts_module in ("tree_sitter_javascript", "tree_sitter_typescript"):
@@ -5577,7 +5578,6 @@ def _extract_generic(
                 if config.ts_module == "tree_sitter_c_sharp" and parent_class_nid:
                     csharp_method_scopes[id(body)] = (node, parent_class_nid)
                 function_bodies.append((func_nid, body))
-                def_nodes.setdefault(func_nid, node)  # RLL: range of the def
                 if config.ts_module in (
                     "tree_sitter_javascript", "tree_sitter_typescript"
                 ):

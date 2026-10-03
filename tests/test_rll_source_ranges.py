@@ -71,3 +71,11 @@ def test_python_ranges_too(tmp_path):
     assert rng["f()"] == [1, 3]
     assert rng["C"] == [6, 8]
     assert rng[".m()"] == [7, 8]
+
+
+def test_bodiless_interface_method_signature_has_a_range(tmp_path):
+    src = "export interface Port {\n  send(msg: string): void;\n  close(\n    code: number,\n  ): void;\n}\n"
+    rng = _ranges(tmp_path, "port.ts", src)
+    assert rng[".send()"] == [2, 2]
+    assert rng[".close()"] == [3, 5]
+    assert rng["Port"] == [1, 6]
