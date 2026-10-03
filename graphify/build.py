@@ -1,3 +1,5 @@
+# Modified by the RLL project (2026-10): external stubs carry role=external.
+# Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
 # assemble node+edge dicts into a NetworkX graph, preserving edge direction
 #
 # Node deduplication — three layers:
@@ -96,6 +98,7 @@ def _mint_external_stub(G: "nx.Graph", node_set: set, nid: str) -> None:
         type="external",
         external=True,
         source_file="",
+        role="external",  # RLL: every node carries a role
     )
     node_set.add(nid)
 
@@ -134,6 +137,7 @@ def mint_external_stubs_in_data(data: dict) -> None:
                 "type": "external",
                 "external": True,
                 "source_file": "",
+                "role": "external",  # RLL: every node carries a role
             })
             minted.add(tgt)
 
