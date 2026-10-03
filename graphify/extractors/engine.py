@@ -1,4 +1,4 @@
-# Modified by the RLL project (2026-10): record each callable's line range (source_range).
+# Modified by the RLL project (2026-10): record each callable's line range (source_range); create test-case nodes for describe/it/test.
 # Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
 """engine — moved verbatim from graphify/extract.py."""
 from __future__ import annotations
@@ -6986,6 +6986,19 @@ def _extract_generic(
     # skipped at the arrow boundary in walk_calls, losing its calls — so let
     # walk_calls descend into such untracked closures with the enclosing caller
     # (#1630 Pattern B). Guarding on the tracked set prevents double-walking.
+    # RLL: one node per describe / it / test call, owning its callback body, so
+    # the calls inside a test case are attributed to that case (registered
+    # here, before the tracked-body set is frozen).
+    if config.ts_module in ("tree_sitter_javascript", "tree_sitter_typescript"):
+        from graphify.rll_granularity import js_collect_test_cases
+        js_collect_test_cases(
+            root, source, stem=stem, str_path=str_path, file_nid=file_nid,
+            nodes=nodes, edges=edges, seen_ids=seen_ids,
+            function_bodies=function_bodies,
+            closure_locals_by_body=closure_locals_by_body, make_id=_make_id,
+            local_names_of=_js_local_bound_names,
+            direct_lexical_names_of=_js_direct_lexical_names,
+        )
     _tracked_body_ids.update(b for _, b in function_bodies)
 
     # Body ids are unique (one language per file), so the Java (flat) and C#

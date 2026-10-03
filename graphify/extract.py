@@ -1,4 +1,4 @@
-# Modified by the RLL project (2026-10): tag every node with a role (product/test-case/test-helper/script/doc).
+# Modified by the RLL project (2026-10): tag every node with a role; keep test-case nodes out of call resolution.
 # Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
 """Deterministic structural extraction from source code using tree-sitter. Outputs nodes+edges dicts."""
 from __future__ import annotations
@@ -8254,6 +8254,8 @@ def extract(
     for n in resolution_nodes:
         if n.get("file_type") == "rationale" or n.get("type") == "namespace":
             continue
+        if n.get("test_kind"):
+            continue  # RLL: a test case is not a call target
         raw = n.get("label", "")
         normalised = raw.strip("()").lstrip(".")
         if normalised:

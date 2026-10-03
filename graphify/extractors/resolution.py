@@ -1,3 +1,5 @@
+# Modified by the RLL project (2026-10): test-case nodes are never type-like rewire targets.
+# Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
 """resolution — moved verbatim from graphify/extract.py."""
 from __future__ import annotations
 
@@ -1099,7 +1101,7 @@ def _disambiguate_colliding_node_ids(
             raw_call["caller_nid"] = unambiguous_remaps[str(raw_call["caller_nid"])]
 
 def _is_type_like_definition(node: dict) -> bool:
-    if node.get("type") == "namespace":
+    if node.get("type") == "namespace" or node.get("test_kind"):
         return False
     label = str(node.get("label", "")).strip()
     if not label:
