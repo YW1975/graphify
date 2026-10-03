@@ -1,4 +1,4 @@
-# Modified by the RLL project (2026-10): external stubs carry role=external.
+# Modified by the RLL project (2026-10): external stubs carry role=external; a call and an import on one node pair keep the call and list both relations.
 # Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
 # assemble node+edge dicts into a NetworkX graph, preserving edge direction
 #
@@ -65,6 +65,12 @@ def _is_ast_tier(item: dict) -> bool:
 # this collapse actually needs.
 _GENERIC_RELATIONS: frozenset[str] = frozenset({"references", "uses", "mentions"})
 _CONFIDENCE_RANK: dict[str, int] = {"EXTRACTED": 3, "INFERRED": 2, "AMBIGUOUS": 1}
+# RLL: one edge survives per node pair. When a USE (a call / CLI invocation)
+# and a DECLARATION-level link (an import) meet on the same pair, the use is
+# the stronger fact and keeps the slot; every relation seen on the pair is
+# listed in the surviving edge's ``relations`` so neither is lost.
+_USE_RELATIONS: frozenset[str] = frozenset({"calls", "indirect_call", "invokes_cli"})
+_LINK_RELATIONS: frozenset[str] = frozenset({"imports", "imports_from", "re_exports"})
 
 # Import-family relations whose target may legitimately be a module OUTSIDE the
 # graph (stdlib, a third-party dependency, another repo). Historically the edge
@@ -1445,6 +1451,18 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
         if G.has_edge(src, tgt):
             existing_attrs = edge_data(G, src, tgt)
             existing_rel = existing_attrs.get("relation")
+            incoming_rel = attrs.get("relation")
+            if existing_rel and incoming_rel and existing_rel != incoming_rel:
+                rels = sorted(set(existing_attrs.get("relations") or [existing_rel])
+                              | set(attrs.get("relations") or [incoming_rel]))
+                if existing_rel in _USE_RELATIONS and incoming_rel in _LINK_RELATIONS:
+                    existing_attrs["relations"] = rels
+                    continue
+                if incoming_rel in _USE_RELATIONS and existing_rel in _LINK_RELATIONS:
+                    attrs["relations"] = rels
+                    G.remove_edge(src, tgt)  # replace, so no import-only key lingers
+                    G.add_edge(src, tgt, **attrs)
+                    continue
             if (
                 attrs.get("relation") in _GENERIC_RELATIONS
                 and existing_rel is not None
