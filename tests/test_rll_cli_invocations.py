@@ -263,3 +263,29 @@ def test_local_runner_closure_is_bound_at_the_owners_call_site(tmp_path):
         ("callback-param", "<module scope>")}
     # a local closure forwarding to a named helper is bound too
     assert _targets(by_id, _from(by_id, inv, "fixture()")) == {"cmdWhoseTurn()"}
+
+
+def test_incremental_rebuild_resolves_through_unchanged_helpers(tmp_path):
+    """Only the test file is re-extracted; the helper's summary and the
+    dispatch table come from the persisted graph as resolution context, the
+    way `graphify extract`/`update` forward them."""
+    r, _, _ = _extract(tmp_path)
+    test_file = tmp_path / "src/test/cli.test.ts"
+    markers = ("_callable", "_callable_class", "_rll_cli_summary", "_rll_cli_params",
+               "_rll_dispatch", "_rll_cli_consts")
+    ctx = []
+    for n in r["nodes"]:
+        if n.get("source_file") in ("", "src/test/cli.test.ts"):
+            continue
+        c = {k: n.get(k) for k in ("id", "label", "source_file", "file_type", "type")}
+        c.update({m: n[m] for m in markers if n.get(m)})
+        ctx.append(c)
+    ctx_edges = [e for e in r["edges"] if e["relation"] in ("contains", "method", "inherits")
+                 and e.get("source_file") != "src/test/cli.test.ts"]
+    r2 = extract([test_file], root=tmp_path, cache_root=tmp_path / "graphify-out", parallel=False,
+                 resolution_context_nodes=ctx, resolution_context_edges=ctx_edges)
+    by_id = {n["id"]: n for n in r2["nodes"]} | {n["id"]: n for n in ctx}
+    inv = [e for e in r2["edges"] if e["relation"] == "invokes_cli"]
+    assert _targets(by_id, _from(by_id, inv, "it: two-level helper chain across files")) == {
+        "cmdWecomFeedback()"}
+    assert _targets(by_id, _from(by_id, inv, "it: direct literal")) == {"cmdStatus()"}
