@@ -1,3 +1,5 @@
+# Modified by the RLL project (2026-10): tag every node with a role (product/test-case/test-helper/script/doc).
+# Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
 """Deterministic structural extraction from source code using tree-sitter. Outputs nodes+edges dicts."""
 from __future__ import annotations
 
@@ -8850,6 +8852,10 @@ def extract(
         _df = _item.get("definition_file")
         if _df and "\\" in str(_df):
             _item["definition_file"] = PurePath(_df).as_posix()
+
+    # RLL: product / test-case / test-helper / script / doc on every node.
+    from graphify.rll_granularity import assign_roles
+    assign_roles(all_nodes)
 
     return {
         "nodes": all_nodes,
