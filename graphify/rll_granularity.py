@@ -520,6 +520,7 @@ class _Facts:
         # its parameters are bound by whoever calls the closure, not by the
         # owner's callers, so they must not enter the owner's summary.
         self.cur_bindable = True
+        self.locals: dict[str, dict] = {}  # local closure key -> {name, rest}
 
     # -- binding resolution ------------------------------------------------
     def resolve_ident(self, ident, owner_fn, depth: int):
@@ -537,6 +538,13 @@ class _Facts:
                 pnames, _rest = _param_list(cur, self.source)
                 if name in pnames:
                     if not passed_body:
+                        local = _local_closure_name(cur, self.source)
+                        if local is not None:
+                            # a `const run = (args) => spawn(...)` closure inside
+                            # the owner: bound at the owner's own call sites
+                            key = str(cur.start_byte)
+                            self.locals[key] = {"name": local, "rest": _param_list(cur, self.source)[1]}
+                            return ["lparam", key, pnames.index(name)]
                         return ["unknown", "callback-param"]
                     if owner_fn is not None and cur == owner_fn:
                         if self.cur_is_case:
@@ -774,6 +782,8 @@ def _spread_of(v):
         return list(v[1])
     if v[0] == "param":
         return [["spread", v[1]]]
+    if v[0] == "lparam":
+        return [["lspread", v[1], v[2]]]
     if v[0] == "unknown":
         return [["unknown", v[1], 1]]
     return [["unknown", "spread-of-scalar", 1]]
@@ -886,8 +896,10 @@ def js_collect_cli_facts(
                     if name and name not in _PATH_FUNCS:
                         args = facts.call_args(n, owner_fn)
                         if args and any(a[0] != "unknown" or a[1] != "computed" for a in args):
-                            owner_entry(owner_nid)["calls"].append(
-                                {"line": line, "name": name, "args": args})
+                            site = {"line": line, "name": name, "args": args}
+                            if fn.type == "member_expression":
+                                site["member"] = True
+                            owner_entry(owner_nid)["calls"].append(site)
             stack.extend(reversed(n.children))
 
     for nid, body in function_bodies:
@@ -906,6 +918,8 @@ def js_collect_cli_facts(
     visit(root, mod_owner, None)
     facts.cur_body = None
     facts.cur_is_case = False
+    for e in per_owner.values():
+        _bind_local_closures(e, facts.locals)  # also scrubs unbound local refs
 
     consts: list[str] = []
     for st in root.named_children:
@@ -943,6 +957,138 @@ def js_collect_cli_facts(
             tgt.setdefault("_rll_dispatch", []).extend(tables)
     if consts and file_nid in by_id:
         by_id[file_nid]["_rll_cli_consts"] = consts
+
+
+def _local_closure_name(fn, source: bytes) -> str | None:
+    """`const run = (args) => ...` -> "run" (an arrow / function expression
+    bound directly to a const/let name)."""
+    if fn.type not in ("arrow_function", "function_expression"):
+        return None
+    p = fn.parent
+    if p is None or p.type != "variable_declarator":
+        return None
+    nm = p.child_by_field_name("name")
+    return _text(nm, source) if nm is not None and nm.type == "identifier" else None
+
+
+def _has_local(v) -> bool:
+    if v[0] in ("lparam", "lspread"):
+        return True
+    if v[0] == "array":
+        return any(_has_local(x) for x in v[1])
+    if v[0] == "spreadarg":
+        return _has_local(v[1])
+    return False
+
+
+def _drop_local(v):
+    if v[0] == "lparam":
+        return ["unknown", "callback-param"]
+    if v[0] == "lspread":
+        return ["unknown", "callback-param", 1]
+    if v[0] == "array":
+        return ["array", [_drop_local(x) for x in v[1]]]
+    if v[0] == "spreadarg":
+        return ["spreadarg", _drop_local(v[1])]
+    return v
+
+
+def _local_key(v) -> str | None:
+    if v[0] in ("lparam", "lspread"):
+        return v[1]
+    if v[0] == "array":
+        for x in v[1]:
+            k = _local_key(x)
+            if k:
+                return k
+    if v[0] == "spreadarg":
+        return _local_key(v[1])
+    return None
+
+
+def _bind_local_closures(entry: dict, locals_: dict) -> None:
+    """Substitute an owner's own calls to its local runner closures.
+
+    A spawn (or a helper call) inside `const run = (args) => spawnSync(node,
+    [CLI, ...args])` refers to the closure's parameters (lparam / lspread).
+    Each call `run([..])` the owner makes binds them, yielding a concrete spawn
+    / call at that call's line. Whatever stays unbound becomes callback-param
+    (uncertain).
+    """
+    local_spawns: dict[str, list] = {}
+    local_calls: dict[str, list] = {}
+    spawns, calls = [], []
+    for sp in entry["spawns"]:
+        k = next((x for x in map(_local_key, [sp["prog"], *sp["argv"]]) if x), None)
+        (local_spawns.setdefault(k, []) if k else spawns).append(sp)
+    for site in entry["calls"]:
+        k = next((x for x in map(_local_key, site["args"]) if x), None)
+        (local_calls.setdefault(k, []) if k else calls).append(site)
+    by_name: dict[str, list[str]] = {}
+    for key in set(local_spawns) | set(local_calls):
+        info = locals_.get(key)
+        if info:
+            by_name.setdefault(info["name"], []).append(key)
+    bound: set[str] = set()
+    for site in list(calls):
+        if site.get("member") or site["name"] not in by_name:
+            continue
+        for key in by_name[site["name"]]:
+            rest_idx = locals_[key].get("rest", -1)
+            for sp in local_spawns.get(key, ()):
+                spawns.append({
+                    "prog": _drop_local(_subst_local_value(sp["prog"], key, site["args"], rest_idx)),
+                    "argv": [_drop_local(x) for x in
+                             _subst_local_elems(sp["argv"], key, site["args"], rest_idx)],
+                    "line": site["line"], "local": site["name"],
+                })
+            for inner in local_calls.get(key, ()):
+                calls.append({
+                    **inner, "line": site["line"],
+                    "args": [_drop_local(_subst_local_arg(a, key, site["args"], rest_idx))
+                             for a in inner["args"]],
+                })
+            bound.add(key)
+    for key, sps in local_spawns.items():
+        if key not in bound:
+            spawns.extend({**sp, "prog": _drop_local(sp["prog"]),
+                           "argv": [_drop_local(x) for x in sp["argv"]]} for sp in sps)
+    for key, cs in local_calls.items():
+        if key not in bound:
+            calls.extend({**c, "args": [_drop_local(a) for a in c["args"]]} for c in cs)
+    entry["spawns"], entry["calls"] = spawns, calls
+
+
+def _subst_local_arg(a, key, args, rest_idx):
+    if a[0] == "lparam" and a[1] == key:
+        return _subst_value(["param", a[2]], args, rest_idx) if _arg_at(args, a[2], rest_idx)[0] != "array" \
+            else _arg_at(args, a[2], rest_idx)
+    if a[0] == "array":
+        return ["array", _subst_local_elems(a[1], key, args, rest_idx)]
+    if a[0] == "spreadarg":
+        return ["spreadarg", _subst_local_arg(a[1], key, args, rest_idx)]
+    return a
+
+
+def _subst_local_value(v, key, args, rest_idx):
+    if v[0] == "lparam" and v[1] == key:
+        return _subst_value(["param", v[2]], args, rest_idx)
+    return v
+
+
+def _subst_local_elems(elems, key, args, rest_idx):
+    mapped = []
+    for el in elems:
+        if el[0] == "lspread" and el[1] == key:
+            mapped.append(["spread", el[2]])
+        elif el[0] == "lparam" and el[1] == key:
+            mapped.append(["param", el[2]])
+        elif el[0] in ("param", "spread"):
+            mapped.append(["__outer__", el])  # the owner's own params: keep as-is
+        else:
+            mapped.append(el)
+    out = _subst_elems([m for m in mapped], args, rest_idx)
+    return [x[1] if x[0] == "__outer__" else x for x in out]
 
 
 def _bindable(fn) -> bool:
@@ -1395,11 +1541,13 @@ def resolve_cli_invocations(
             emit(owner, disp_id, line=line, sub=None, via=via, chain=chain,
                  uncertain=True, reason=sub[1] if sub[0] == "unknown" else "computed", entry=entry)
             return False
-        if sub[1].startswith("-"):
+        targets, why = R.handlers(entry, sub[1])
+        if sub[1].startswith("-") and not targets:
+            # a global flag (`--json status`) or a flag the dispatcher handles
+            # before its switch: the subcommand is not where we looked
             emit(owner, disp_id, line=line, sub=sub[1], via=via, chain=chain,
                  uncertain=True, reason="flag-before-subcommand", entry=entry)
             return False
-        targets, why = R.handlers(entry, sub[1])
         if not targets:
             emit(owner, disp_id, line=line, sub=sub[1], via=via, chain=chain,
                  uncertain=True, reason=why, entry=entry)

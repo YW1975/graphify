@@ -122,7 +122,21 @@ describe('cli', () => {
   it('not the cli', () => {
     spawnSync('git', ['status']);
   });
+  it('local runner closure', () => {
+    const runLocal = (args: string[]) => spawnSync(process.execPath, [CLI, ...args]);
+    runLocal(['status']);
+  });
+  it('local closure never called', () => {
+    const idle = (args: string[]) => spawnSync(process.execPath, [CLI, ...args]);
+    return idle;
+  });
 });
+
+function fixture() {
+  const go = (sub: string) => runSub(sub);
+  go('whose-turn');
+  return {};
+}
 """
 
 
@@ -239,3 +253,13 @@ def test_cli_path_pattern_is_configurable(tmp_path, monkeypatch):
     # cli.js no longer counts as the CLI, so the literal spawn is a script path
     assert _uncertain(by_id, inv, "it: direct literal") == {
         ("script-path", "<unresolved process invocation>")}
+
+
+def test_local_runner_closure_is_bound_at_the_owners_call_site(tmp_path):
+    _, by_id, inv = _extract(tmp_path)
+    edges = _from(by_id, inv, "it: local runner closure")
+    assert _targets(by_id, edges) == {"cmdStatus()"}
+    assert _uncertain(by_id, inv, "it: local closure never called") == {
+        ("callback-param", "<module scope>")}
+    # a local closure forwarding to a named helper is bound too
+    assert _targets(by_id, _from(by_id, inv, "fixture()")) == {"cmdWhoseTurn()"}
