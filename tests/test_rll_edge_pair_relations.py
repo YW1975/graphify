@@ -1,3 +1,5 @@
+# Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
+# Added by the RLL project (2026-10); not part of upstream Graphify.
 """A call and an import on the same node pair both survive the build.
 
 Added by the RLL project (2026-10). The graph keeps one edge per node pair;

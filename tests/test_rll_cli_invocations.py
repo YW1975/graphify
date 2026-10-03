@@ -1,3 +1,5 @@
+# Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
+# Added by the RLL project (2026-10); not part of upstream Graphify.
 """Tests that launch the CLI as a subprocess get an edge to the command handler.
 
 Added by the RLL project (2026-10). `spawnSync(process.execPath, [CLI,

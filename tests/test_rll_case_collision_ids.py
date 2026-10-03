@@ -1,3 +1,5 @@
+# Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
+# Added by the RLL project (2026-10); not part of upstream Graphify.
 """Top-level JS/TS names that differ only in case keep separate nodes.
 
 Added by the RLL project (2026-10). Node ids are case-folded, so `interface

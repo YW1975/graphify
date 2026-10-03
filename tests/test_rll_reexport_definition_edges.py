@@ -1,3 +1,5 @@
+# Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
+# Added by the RLL project (2026-10); not part of upstream Graphify.
 """Edges through a re-export barrel land on the definition, not the barrel.
 
 Added by the RLL project (2026-10). `import { qux } from './index'` where

@@ -1,3 +1,5 @@
+# Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
+# Added by the RLL project (2026-10); not part of upstream Graphify.
 """Every node carries a ``role`` derived from its path and kind.
 
 Added by the RLL project (2026-10). Without it, test code and product code

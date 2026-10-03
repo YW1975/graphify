@@ -1,3 +1,5 @@
+# Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
+# Added by the RLL project (2026-10); not part of upstream Graphify.
 """Callable / class nodes carry their full line range (``source_range``).
 
 Added by the RLL project (2026-10). ``source_location`` only names a node's

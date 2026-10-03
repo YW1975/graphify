@@ -1,3 +1,5 @@
+# Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
+# Added by the RLL project (2026-10); not part of upstream Graphify.
 """describe / it / test calls become test-case nodes that own their calls.
 
 Added by the RLL project (2026-10). Calls written inside an anonymous
