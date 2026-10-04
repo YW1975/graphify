@@ -122,3 +122,12 @@ def test_import_kind_per_binding(tmp_path):
         ("re_exports", "L4", "a", "type"),
         ("re_exports", "L4", "b", "type"),
     ]
+
+
+def test_require_bindings_are_value_imports(tmp_path):
+    (tmp_path / "lib.ts").write_text("export function cmd() { return 1; }\n")
+    (tmp_path / "use.ts").write_text("export function run() {\n  const { cmd } = require('./lib');\n  return cmd();\n}\n")
+    r = extract([tmp_path / "use.ts", tmp_path / "lib.ts"], root=tmp_path, cache_root=tmp_path / "out", parallel=False)
+    kinds = {(e["relation"], e.get("import_kind")) for e in r["edges"]
+             if e["relation"] in ("imports", "imports_from") and e.get("source_file", "").endswith("use.ts")}
+    assert kinds and all(k == "value" for _, k in kinds), kinds

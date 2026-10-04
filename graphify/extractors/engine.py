@@ -2127,6 +2127,7 @@ def _require_imports_js(node, source: bytes, importer_nid: str, stem: str, edges
             "source": importer_nid,
             "target": tgt_nid,
             "relation": "imports_from",
+            "import_kind": "value",  # RLL: require() is always a runtime load
             "context": "import",
             "confidence": "EXTRACTED",
             "source_file": str_path,
@@ -2164,6 +2165,7 @@ def _require_imports_js(node, source: bytes, importer_nid: str, stem: str, edges
                     "source": importer_nid,
                     "target": _make_id(target_stem, sym),
                     "relation": "imports",
+                    "import_kind": "value",  # RLL: require() is always a runtime load
                     "context": "import",
                     "confidence": "EXTRACTED",
                     "source_file": str_path,
