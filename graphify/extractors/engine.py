@@ -1404,6 +1404,22 @@ def _js_collect_pattern_idents(node, source: bytes, bound: set) -> None:
         if val is not None:
             _js_collect_pattern_idents(val, source, bound)
         return
+    # MODIFIED BY YW1975: two binding forms whose DEFAULT VALUE was collected as a
+    # bound name, so a same-named module declaration read in the default (and
+    # anywhere else in the function) looked local and its reference was lost:
+    #   `{ a = X }`    object_assignment_pattern — only `left` (a) is bound
+    #   `(c: T = Z)`   TS required/optional_parameter — only `pattern` (c) is bound;
+    #                  its `value` is the default, its `type` the annotation
+    if t == "object_assignment_pattern":
+        left = node.child_by_field_name("left")
+        if left is not None:
+            _js_collect_pattern_idents(left, source, bound)
+        return
+    if t in ("required_parameter", "optional_parameter"):
+        pattern = node.child_by_field_name("pattern")
+        if pattern is not None:
+            _js_collect_pattern_idents(pattern, source, bound)
+        return
     for c in node.children:
         if c.is_named:
             _js_collect_pattern_idents(c, source, bound)
@@ -7260,9 +7276,21 @@ def _extract_generic(
     if config.ts_module in ("tree_sitter_javascript", "tree_sitter_typescript"):
         # RLL: every top-level declaration gets a node and a range; load-time effects are recorded.
         from graphify.rll_granularity import annotate_module_declarations
+        _rll_edges_from = len(edges)
         annotate_module_declarations(root, source, nodes, edges, seen_ids, file_nid=file_nid,
                                      module_nid=_module_nid, stem=stem, str_path=str_path,
                                      make_id=_make_id, nid_of=js_nid)
+        # RLL: same-file reads of those declarations (design §3.2 item 2).
+        from graphify.rll_granularity import annotate_same_file_reads
+        annotate_same_file_reads(root, source, nodes, edges, function_bodies=function_bodies,
+                                 initializer_nodes=initializer_nodes, file_nid=file_nid,
+                                 module_nid=_module_nid, str_path=str_path)
+        # The edge clean-up above already built ``result["edges"]``; an edge these
+        # passes appended to ``edges`` (a new declaration's `contains`, a read)
+        # never reached the result. Same validity rule as the clean-up.
+        for _edge in edges[_rll_edges_from:]:
+            if _edge["source"] in seen_ids and _edge["target"] in seen_ids:
+                result["edges"].append(_edge)
     if callable_def_nids:
         # Mark function / method / class defs with a `_callable` attribute so the
         # cross-file indirect_call pass can resolve a by-name callback only to a real

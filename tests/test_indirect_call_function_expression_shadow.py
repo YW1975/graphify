@@ -59,6 +59,25 @@ def _indirect(r):
     return {(e["source"], e["target"]) for e in r["edges"] if e["relation"] == "indirect_call"}
 
 
+def _assert_k_read_only_by_vendor_module(r, nid, indirect):
+    """No node outside the vendor bundle may point at its private `k`.
+
+    RLL fork divergence (2026-10, 960df3c "reach calls written at module scope"):
+    the fixture's IIFE runs at load time, so its `return{k:k}` now reaches the
+    graph as `<module scope> -indirect_call-> k` -- a true reference to the
+    bundle's own nested `k`, the same edge upstream already emits for that code
+    inside a named function (`function f(){function k(){} return{k:k}}` gives
+    `f -> f_k`). Upstream's `all(t != k)` held only because module-scope
+    statements were never walked. The property these tests guard is unchanged:
+    the shadowed local `k` in the other file must not resolve to the bundle's.
+    """
+    vendor_module = {n["id"] for n in r["nodes"]
+                     if n["label"] == "<module scope>" and "vendor.min" in n["source_file"]}
+    assert all(t != nid["k"] for s, t in indirect if s not in vendor_module)
+    assert any((s, nid["k"]) in indirect for s in vendor_module), \
+        "the bundle's own load-time read of k is a real reference and must stay"
+
+
 def test_inline_function_expression_param_emits_no_indirect_call(tmp_path):
     """The reported shape: a minified bundle's private `k` must not become a
     fabricated target because an inline callback names its parameter `k`."""
@@ -66,7 +85,7 @@ def test_inline_function_expression_param_emits_no_indirect_call(tmp_path):
         "vendor.min.js": VENDOR,
         "a.js": "export function run(xs, m){ return xs.some(function (k) { return m.indexOf(k); }); }\n",
     })
-    assert all(t != nid["k"] for _s, t in _indirect(r))
+    _assert_k_read_only_by_vendor_module(r, nid, _indirect(r))
 
 
 def test_named_function_expression_param_shadows(tmp_path):
@@ -75,7 +94,7 @@ def test_named_function_expression_param_shadows(tmp_path):
         "vendor.min.js": VENDOR,
         "a.js": "export function run(xs, m){ return xs.some(function nm(k) { return m.indexOf(k); }); }\n",
     })
-    assert all(t != nid["k"] for _s, t in _indirect(r))
+    _assert_k_read_only_by_vendor_module(r, nid, _indirect(r))
 
 
 def test_nested_const_function_expression_shadows(tmp_path):
@@ -85,7 +104,7 @@ def test_nested_const_function_expression_shadows(tmp_path):
         "vendor.min.js": VENDOR,
         "a.js": "export function run(m){ const f = function (k) { return m.indexOf(k); }; return f(1); }\n",
     })
-    assert all(t != nid["k"] for _s, t in _indirect(r))
+    _assert_k_read_only_by_vendor_module(r, nid, _indirect(r))
 
 
 def test_top_level_const_function_expression_was_already_tracked(tmp_path):
@@ -98,7 +117,7 @@ def test_top_level_const_function_expression_was_already_tracked(tmp_path):
         "a.js": "export const f = function (k) { return [].indexOf(k); };\n",
     })
     assert "f" in nid
-    assert all(t != nid["k"] for _s, t in _indirect(r))
+    _assert_k_read_only_by_vendor_module(r, nid, _indirect(r))
 
 
 def test_function_expression_local_shadows(tmp_path):
@@ -107,7 +126,7 @@ def test_function_expression_local_shadows(tmp_path):
         "vendor.min.js": VENDOR,
         "a.js": "export function run(m){ return [].map(function () { const k = 1; return m.get(k); }); }\n",
     })
-    assert all(t != nid["k"] for _s, t in _indirect(r))
+    _assert_k_read_only_by_vendor_module(r, nid, _indirect(r))
 
 
 def test_arrow_callback_still_shadows(tmp_path):
@@ -116,7 +135,7 @@ def test_arrow_callback_still_shadows(tmp_path):
         "vendor.min.js": VENDOR,
         "a.js": "export function run(xs, m){ return xs.some(k => m.indexOf(k)); }\n",
     })
-    assert all(t != nid["k"] for _s, t in _indirect(r))
+    _assert_k_read_only_by_vendor_module(r, nid, _indirect(r))
 
 
 def test_same_named_reference_after_the_expression_still_resolves(tmp_path):
@@ -188,7 +207,7 @@ def test_typescript_function_expression_shadows(tmp_path):
     finally:
         os.chdir(old)
     nid = {n["label"].rstrip("()"): n["id"] for n in r["nodes"]}
-    assert all(t != nid["k"] for _s, t in _indirect(r))
+    _assert_k_read_only_by_vendor_module(r, nid, _indirect(r))
 
 
 def test_generator_function_expression_param_shadows(tmp_path):
@@ -200,7 +219,7 @@ def test_generator_function_expression_param_shadows(tmp_path):
         "vendor.min.js": VENDOR,
         "a.js": "export function run(xs, m){ const g = function*(k){ yield m.indexOf(k); }; return g; }\n",
     })
-    assert all(t != nid["k"] for _s, t in _indirect(r))
+    _assert_k_read_only_by_vendor_module(r, nid, _indirect(r))
 
 
 def test_tsx_function_expression_shadows(tmp_path):
@@ -223,4 +242,4 @@ def test_tsx_function_expression_shadows(tmp_path):
     finally:
         os.chdir(old)
     nid = {n["label"].rstrip("()"): n["id"] for n in r["nodes"]}
-    assert all(t != nid["k"] for _s, t in _indirect(r))
+    _assert_k_read_only_by_vendor_module(r, nid, _indirect(r))

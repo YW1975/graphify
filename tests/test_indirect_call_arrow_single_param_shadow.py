@@ -41,6 +41,25 @@ def _indirect(r):
     return {(e["source"], e["target"]) for e in r["edges"] if e["relation"] == "indirect_call"}
 
 
+def _assert_k_read_only_by_vendor_module(r, nid, indirect):
+    """No node outside the vendor bundle may point at its private `k`.
+
+    RLL fork divergence (2026-10, 960df3c "reach calls written at module scope"):
+    the fixture's IIFE runs at load time, so its `return{k:k}` now reaches the
+    graph as `<module scope> -indirect_call-> k` -- a true reference to the
+    bundle's own nested `k`, the same edge upstream already emits for that code
+    inside a named function (`function f(){function k(){} return{k:k}}` gives
+    `f -> f_k`). Upstream's `all(t != k)` held only because module-scope
+    statements were never walked. The property these tests guard is unchanged:
+    the shadowed local `k` in the other file must not resolve to the bundle's.
+    """
+    vendor_module = {n["id"] for n in r["nodes"]
+                     if n["label"] == "<module scope>" and "vendor.min" in n["source_file"]}
+    assert all(t != nid["k"] for s, t in indirect if s not in vendor_module)
+    assert any((s, nid["k"]) in indirect for s in vendor_module), \
+        "the bundle's own load-time read of k is a real reference and must stay"
+
+
 def test_single_unparenthesised_arrow_param_emits_no_indirect_call(tmp_path):
     """The reported shape: a minified bundle's private `k` must not become a
     fabricated target because an arrow names its only parameter `k`."""
@@ -48,7 +67,7 @@ def test_single_unparenthesised_arrow_param_emits_no_indirect_call(tmp_path):
         "vendor.min.js": "var Lib=function(){function k(a){return a}return{k:k}}();\n",
         "a.js": "function sink(f){ return f; }\nexport const run = k => sink(k);\n",
     })
-    assert all(t != nid["k"] for _s, t in _indirect(r))
+    _assert_k_read_only_by_vendor_module(r, nid, _indirect(r))
 
 
 def test_parenthesised_arrow_param_still_shadows(tmp_path):
@@ -57,7 +76,7 @@ def test_parenthesised_arrow_param_still_shadows(tmp_path):
         "vendor.min.js": "var Lib=function(){function k(a){return a}return{k:k}}();\n",
         "a.js": "function sink(f){ return f; }\nexport const run = (k) => sink(k);\n",
     })
-    assert all(t != nid["k"] for _s, t in _indirect(r))
+    _assert_k_read_only_by_vendor_module(r, nid, _indirect(r))
 
 
 def test_async_single_param_arrow_shadows(tmp_path):
@@ -66,7 +85,7 @@ def test_async_single_param_arrow_shadows(tmp_path):
         "vendor.min.js": "var Lib=function(){function k(a){return a}return{k:k}}();\n",
         "a.js": "function sink(f){ return f; }\nexport const run = async k => sink(k);\n",
     })
-    assert all(t != nid["k"] for _s, t in _indirect(r))
+    _assert_k_read_only_by_vendor_module(r, nid, _indirect(r))
 
 
 def test_arrow_param_does_not_shadow_a_genuine_reference(tmp_path):

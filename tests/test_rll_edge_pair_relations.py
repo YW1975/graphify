@@ -44,12 +44,29 @@ def test_call_wins_the_pair_and_import_is_recorded(order, directed):
     assert "type_only" not in d  # no key of the displaced import lingers on the call itself
 
 
-def test_unrelated_relation_pairs_keep_previous_behaviour():
+def test_a_read_on_a_called_pair_keeps_the_call_and_lists_both():
+    """S3 (design §3.2): a function that both calls and reads a declaration keeps one
+    edge, the call, and the read is listed beside it instead of being dropped."""
     ext = _ext(("calls",))
-    ext["edges"].append({"source": "a", "target": "b_foo", "relation": "references",
-                         "confidence": "EXTRACTED", "source_file": "a.ts"})
+    ext["edges"].append({"source": "a", "target": "b_foo", "relation": "references", "context": "read",
+                         "confidence": "EXTRACTED", "source_file": "a.ts", "source_location": "L3"})
     d = build_from_json(ext).edges["a", "b_foo"]
     assert d["relation"] == "calls"
+    assert {(r["relation"], r.get("context")) for r in d["relations"]} == {("calls", "call"), ("references", "read")}
+
+
+def test_a_read_and_a_write_of_one_declaration_both_survive():
+    ext = _ext(())
+    for ctx, line in (("read", "L2"), ("write", "L5")):
+        ext["edges"].append({"source": "a", "target": "b_foo", "relation": "references", "context": ctx,
+                             "confidence": "EXTRACTED", "source_file": "a.ts", "source_location": line})
+    d = build_from_json(ext, directed=True).edges["a", "b_foo"]
+    assert [(r["context"], r["source_location"]) for r in d["relations"]] == [("read", "L2"), ("write", "L5")]
+
+
+def test_one_relation_seen_twice_adds_no_relations_list():
+    ext = _ext(("calls", "calls"))
+    d = build_from_json(ext).edges["a", "b_foo"]
     assert "relations" not in d
 
 

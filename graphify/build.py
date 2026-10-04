@@ -1,4 +1,4 @@
-# Modified by the RLL project (2026-10): external stubs carry role=external; a call and an import on one node pair keep the call and list both relations.
+# Modified by the RLL project (2026-10): external stubs carry role=external; a call and an import on one node pair keep the call; every relation met on a node pair is listed on the survivor.
 # Copyright 2026 RLL project contributors. Licensed under the Apache License, Version 2.0.
 # assemble node+edge dicts into a NetworkX graph, preserving edge direction
 #
@@ -1508,13 +1508,21 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
             existing_attrs = edge_data(G, src, tgt)
             existing_rel = existing_attrs.get("relation")
             incoming_rel = attrs.get("relation")
-            if existing_rel and incoming_rel and existing_rel != incoming_rel:
+            # RLL: every distinct (relation, context) met on the pair is listed in
+            # the survivor's ``relations``, whichever edge survives below. Only a
+            # call meeting an import kept both before; a same-file read
+            # (`references`) arriving on a pair that already carries `calls` or
+            # `contains`, or a read and a write of one declaration from the same
+            # function, lost the losing record.
+            if existing_rel and incoming_rel:
                 rels = _merge_relation_records(existing_attrs, attrs)
-                if existing_rel in _USE_RELATIONS and incoming_rel in _LINK_RELATIONS:
+                if len(rels) > 1:
                     existing_attrs["relations"] = rels
+                    attrs["relations"] = rels
+            if existing_rel and incoming_rel and existing_rel != incoming_rel:
+                if existing_rel in _USE_RELATIONS and incoming_rel in _LINK_RELATIONS:
                     continue
                 if incoming_rel in _USE_RELATIONS and existing_rel in _LINK_RELATIONS:
-                    attrs["relations"] = rels
                     G.remove_edge(src, tgt)  # replace, so no import-only key lingers
                     G.add_edge(src, tgt, **attrs)
                     continue

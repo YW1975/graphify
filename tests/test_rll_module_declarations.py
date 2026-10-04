@@ -71,6 +71,16 @@ def test_every_top_level_declarator_has_a_node_range_and_kind(tmp_path):
     assert _one(g, "I", "data")["source_range"] == [20, 20]
 
 
+def test_every_new_declaration_node_is_contained_by_its_file(tmp_path):
+    """The declaration pass runs after the per-file edge clean-up had already built the
+    result, so the `contains` edge it appended for a node it created never reached the
+    output: `counter`, `pending`, `legacy` shipped as orphans."""
+    r = _nodes(tmp_path)
+    contained = {e["target"] for e in r["edges"] if e["relation"] == "contains"}
+    for label in ("S", "counter", "pending", "legacy", "other", "p", "r"):
+        assert _one(r["by_label"], label)["id"] in contained, label
+
+
 def test_exported_destructuring_keeps_its_keys_and_imports_get_no_node(tmp_path):
     g = _nodes(tmp_path)["by_label"]
     assert "e1" in g and "e2" in g and "alias" not in g, "exported patterns are named by key (#2604)"

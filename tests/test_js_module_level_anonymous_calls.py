@@ -13,16 +13,14 @@ attributing such calls to the file node, mirroring the #3408 fix that
 already does this for `this.X = fn` member assignments found in the same
 kind of statement.
 
-Known remaining gap, not fixed here: a callee that is BOTH the target of a
+Formerly a known gap, closed in the RLL fork (2026-10, 960df3c "reach calls
+written at module scope", item 3): a callee that is BOTH the target of a
 direct import from the same file AND called only from a module-level
-anonymous closure still does not resolve. The cross-file resolution pass
-in `extract.py` dedupes strictly by (source, target) pair regardless of
-relation, so the file node's own `imports`/`imports_from` edge to that
-target pre-empts the `calls` edge from ever being added -- a NAMED
-function's calls never collide this way because imports are always
-attributed to the file node, never to a function node, so this collision
-is specific to a caller that IS the file node. See
-`test_direct_import_collision_is_a_known_remaining_gap` below.
+anonymous closure did not resolve, because direct-call dedupe consulted every
+existing (source, target) pair, so the file node's own `imports` edge to that
+target pre-empted the `calls` edge. Direct-call dedupe now uses
+`call_like_pairs`, as the indirect path already did, so an `imports` edge no
+longer suppresses a call. See `test_direct_import_and_module_closure_call_both_survive`.
 """
 from __future__ import annotations
 
@@ -91,17 +89,13 @@ def test_named_enclosing_function_case_is_unaffected(tmp_path):
     assert ("spec.ts", "helper()") not in calls
 
 
-def test_direct_import_collision_is_a_known_remaining_gap(tmp_path):
-    """Documents the limitation described in this module's docstring: when
-    the callee is BOTH directly imported by the same file AND only called
-    from a module-level anonymous closure, the file node already has an
-    `imports` edge to it, and the cross-file resolution pass's (source,
-    target) dedup (relation-blind) silently drops the `calls` edge. This is
-    a pre-existing limitation of that dedup, exposed here because the file
-    node is now a valid `calls` source for the first time -- a NAMED
-    function caller never collides this way, since imports are always
-    attributed to the file node, never to a function node."""
-    calls, _, _ = _extract(tmp_path, {
+def test_direct_import_and_module_closure_call_both_survive(tmp_path):
+    """RLL fork divergence (2026-10, 960df3c): upstream pinned this as a gap --
+    the file node's `imports` edge to `helper` swallowed the closure's `calls`
+    edge on the same (source, target) pair. Direct-call dedupe now uses
+    `call_like_pairs`, so both facts survive. The import half is asserted too:
+    closing the gap must not have been done by dropping the import."""
+    calls, lbl, r = _extract(tmp_path, {
         "helper.ts": "export function helper(x: number) { return x; }\n",
         "spec.ts": (
             "import { helper } from './helper';\n"
@@ -111,5 +105,7 @@ def test_direct_import_collision_is_a_known_remaining_gap(tmp_path):
             "});\n"
         ),
     })
-    # Documents current behavior (the gap), not the desired end state.
-    assert ("spec.ts", "helper()") not in calls
+    assert ("spec.ts", "helper()") in calls
+    assert any(e["relation"] in ("imports", "imports_from")
+               and lbl.get(e["source"]) == "spec.ts" and lbl.get(e["target"]) == "helper()"
+               for e in r["edges"])

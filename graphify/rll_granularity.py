@@ -315,6 +315,287 @@ def _decl_pattern_names(pattern, text) -> list[str]:
     return sorted(set(out))
 
 
+# ── 1c. Same-file read references (TS/JS) ────────────────────────────────────
+#
+# Symbol-level impact (RLL design 2026-10-04 §3.2 item 2, same-file half): when a
+# module-level declaration changes, the code that READS it is affected, and a call
+# graph cannot say which code that is — `const B = [...A]` or `return LIMIT * 2`
+# calls nothing. This pass, run after the S2 declaration pass, emits
+#
+#     <owner> -references-> <module-level declaration>   context: read | write
+#
+# once per (owner, declaration, context), at the first such line. The owner is the
+# innermost TRACKED callable (the base extractor's ``function_bodies``: functions,
+# methods, test cases, const-assigned arrows), a field initializer's owner, the
+# declaration whose initializer holds the read (`const B = [...A]` → B→A), the file
+# for `export default X`, and `<module scope>` for statements that run on load.
+#
+# Shadowing reuses the base walk's collectors (`_js_local_bound_names` for the
+# function-wide set, `_js_direct_lexical_names` per block), plus what only a read
+# needs: a nested function/class declaration name, a named function expression's
+# own name, catch and for-in/of bindings. Doubt resolves towards NOT shadowing — an
+# extra edge selects a test too many, a wrongly shadowed one misses a test.
+#
+# Not reads: property names (`obj.X`, `{X: 1}`), type positions (`: X`, `typeof X`
+# in a type), import/export specifier lists, labels, intrinsic JSX tags. Reads:
+# value identifiers, shorthand `{X}`, defaults inside patterns, `export default X`,
+# capitalised JSX tags (`<Foo/>` is `createElement(Foo)`). `X = …` is a write,
+# `X += …` / `X++` both.
+
+_JS_FN_SCOPES = frozenset({
+    "function_declaration", "generator_function_declaration", "function_expression", "function",
+    "generator_function", "arrow_function", "method_definition",
+})
+_JS_NOT_CODE = frozenset({
+    "type_annotation", "type_arguments", "type_parameters", "type_query", "implements_clause",
+    "nested_type_identifier", "interface_declaration", "type_alias_declaration", "opting_type_annotation",
+    "omitting_type_annotation", "asserts_annotation", "type_predicate_annotation", "ambient_declaration",
+    "abstract_method_signature", "method_signature", "function_signature", "index_signature",
+    "import_statement", "export_clause", "statement_identifier", "jsx_closing_element", "comment",
+})
+_JS_NAMED_DECLS = frozenset({
+    "function_declaration", "generator_function_declaration", "class_declaration", "abstract_class_declaration",
+})
+
+
+def annotate_same_file_reads(root, source: bytes, nodes: list, edges: list, *, function_bodies,
+                             initializer_nodes, file_nid: str, module_nid: str, str_path: str) -> None:
+    from graphify.extractors.engine import (
+        _js_collect_pattern_idents, _js_direct_lexical_names, _js_local_bound_names,
+    )
+    if root is None or root.type != "program":
+        return
+
+    def text(n) -> str:
+        return source[n.start_byte:n.end_byte].decode("utf-8", errors="replace")
+
+    # Targets: this file's value declarations, by name. Not `label_to_nid`, which strips
+    # leading dots and is last-write-wins. A type shares its name with a value only in
+    # type position, which is never a read.
+    decls: dict[str, str] = {}
+    for n in nodes:
+        if n.get("source_file") == str_path and n.get("decl_name") and n.get("decl_kind") != "type":
+            decls.setdefault(n["decl_name"], n["id"])
+    if not decls:
+        return
+    present = {n.get("id") for n in nodes}
+    module_owner = module_nid if module_nid in present else file_nid
+
+    def key(n):
+        return (n.start_byte, n.end_byte, n.type)
+
+    owner_of: dict[tuple, tuple[str, ...]] = {}
+    for nid, body in function_bodies:
+        if body is None or (nid != file_nid and nid not in present):
+            continue
+        owner = (module_owner if nid == file_nid else nid,)
+        owner_of.setdefault(key(body), owner)
+        if body.parent is not None and body.parent.type in _JS_FN_SCOPES:
+            owner_of.setdefault(key(body.parent), owner)  # parameter defaults belong to it too
+    for nid, init in initializer_nodes:
+        if init is not None and nid in present:
+            owner_of.setdefault(key(init), (nid,))
+
+    found: dict[tuple[str, str, str], int] = {}
+
+    def ref(ident, owners, scopes, ctx: str) -> None:
+        name = text(ident)
+        target = decls.get(name)
+        if target is None or any(name in s for s in scopes):
+            return
+        line = ident.start_point[0] + 1
+        for o in owners:
+            if o != target:
+                k = (o, target, ctx)
+                if k not in found or line < found[k]:
+                    found[k] = line
+
+    def names_of(pattern) -> frozenset[str]:
+        bound: set[str] = set()
+        _js_collect_pattern_idents(pattern, source, bound)
+        return frozenset(bound)
+
+    def pattern(n, owners, scopes, mode: str) -> None:
+        """A binding (mode "bind") or assignment target (mode "write"): its names are
+        bound or written, its defaults and computed keys are read."""
+        t = n.type
+        if t in ("identifier", "shorthand_property_identifier_pattern"):
+            if mode == "write":
+                ref(n, owners, scopes, "write")
+            return
+        if t in _JS_NOT_CODE:
+            return
+        if t in ("assignment_pattern", "object_assignment_pattern"):
+            left, right = n.child_by_field_name("left"), n.child_by_field_name("right")
+            if left is not None:
+                pattern(left, owners, scopes, mode)
+            if right is not None:
+                visit(right, owners, scopes)
+            return
+        if t == "pair_pattern":
+            k, v = n.child_by_field_name("key"), n.child_by_field_name("value")
+            if k is not None and k.type == "computed_property_name":
+                visit(k, owners, scopes)
+            if v is not None:
+                pattern(v, owners, scopes, mode)
+            return
+        if t in ("required_parameter", "optional_parameter"):
+            p, v = n.child_by_field_name("pattern"), n.child_by_field_name("value")
+            if p is not None:
+                pattern(p, owners, scopes, mode)
+            if v is not None:
+                visit(v, owners, scopes)
+            return
+        if t in ("member_expression", "subscript_expression"):
+            visit(n, owners, scopes)  # `X.y = …` reads the binding X
+            return
+        for c in n.named_children:
+            pattern(c, owners, scopes, mode)
+
+    def visit(n, owners, scopes) -> None:
+        t = n.type
+        if t in _JS_NOT_CODE:
+            return
+        owners = owner_of.get(key(n), owners)
+        if t in ("identifier", "shorthand_property_identifier"):
+            ref(n, owners, scopes, "read")
+            return
+        if t in _JS_FN_SCOPES:
+            local = set(_js_local_bound_names(n, source))
+            name = n.child_by_field_name("name")
+            if name is not None and t in ("function_expression", "function", "generator_function"):
+                local.add(text(name))  # a named function expression sees its own name
+            inner = scopes + (frozenset(local),)
+            for i, c in enumerate(n.children):
+                field = n.field_name_for_child(i)
+                if not c.is_named or field in ("name", "return_type", "type_parameters"):
+                    continue
+                if field in ("parameters", "parameter"):
+                    pattern(c, owners, inner, "bind")
+                else:
+                    visit(c, owners, inner)
+            return
+        if t in ("statement_block", "for_statement", "switch_body"):
+            local = set()
+            for holder in ([n] if t != "switch_body" else n.named_children):
+                local |= _js_direct_lexical_names(holder, source)
+                for c in holder.named_children:
+                    if c.type in _JS_NAMED_DECLS and c.child_by_field_name("name") is not None:
+                        local.add(text(c.child_by_field_name("name")))
+            if local:
+                scopes = scopes + (frozenset(local),)
+        elif t == "for_in_statement":
+            left, right, body = (n.child_by_field_name(f) for f in ("left", "right", "body"))
+            if right is not None:
+                visit(right, owners, scopes)
+            if any(c.type in ("let", "const", "var") for c in n.children):
+                inner = scopes + (names_of(left),) if left is not None else scopes
+                if left is not None:
+                    pattern(left, owners, inner, "bind")
+            else:
+                inner = scopes
+                if left is not None:
+                    pattern(left, owners, scopes, "write")
+            if body is not None:
+                visit(body, owners, inner)
+            return
+        elif t == "catch_clause":
+            param, body = n.child_by_field_name("parameter"), n.child_by_field_name("body")
+            inner = scopes + (names_of(param),) if param is not None else scopes
+            if param is not None:
+                pattern(param, owners, inner, "bind")
+            if body is not None:
+                visit(body, owners, inner)
+            return
+        elif t == "variable_declarator":
+            name, value = n.child_by_field_name("name"), n.child_by_field_name("value")
+            if name is not None:
+                pattern(name, owners, scopes, "bind")
+            if value is not None:
+                visit(value, owners, scopes)
+            return
+        elif t in ("assignment_expression", "augmented_assignment_expression", "update_expression"):
+            target = n.child_by_field_name("argument" if t == "update_expression" else "left")
+            right = n.child_by_field_name("right")
+            if target is not None:
+                if t == "assignment_expression" and target.type != "identifier":
+                    if target.type in ("object_pattern", "array_pattern"):
+                        pattern(target, owners, scopes, "write")
+                    else:
+                        visit(target, owners, scopes)
+                elif target.type == "identifier":
+                    ref(target, owners, scopes, "write")
+                    if t != "assignment_expression":
+                        ref(target, owners, scopes, "read")
+                else:
+                    visit(target, owners, scopes)
+            if right is not None:
+                visit(right, owners, scopes)
+            return
+        elif t in ("jsx_opening_element", "jsx_self_closing_element"):
+            name = n.child_by_field_name("name")
+            if name is not None:
+                if name.type == "identifier":
+                    if text(name)[:1].isupper():
+                        ref(name, owners, scopes, "read")
+                else:
+                    visit(name, owners, scopes)  # `<Lib.Item>` reads Lib
+            for c in n.named_children:
+                if name is None or key(c) != key(name):
+                    visit(c, owners, scopes)
+            return
+        elif t == "pair":
+            k, v = n.child_by_field_name("key"), n.child_by_field_name("value")
+            if k is not None and k.type == "computed_property_name":
+                visit(k, owners, scopes)
+            if v is not None:
+                visit(v, owners, scopes)
+            return
+        elif t in ("class_declaration", "abstract_class_declaration", "class", "enum_declaration",
+                   "internal_module", "module"):
+            name = n.child_by_field_name("name")
+            if t == "class" and name is not None:
+                scopes = scopes + (frozenset({text(name)}),)
+            for c in n.named_children:
+                if name is None or key(c) != key(name):
+                    visit(c, owners, scopes)
+            return
+        for c in n.named_children:
+            visit(c, owners, scopes)
+
+    for stmt in root.named_children:
+        inner = stmt
+        if stmt.type == "export_statement":
+            decl = stmt.child_by_field_name("declaration")
+            if decl is None:
+                value = stmt.child_by_field_name("value")
+                if value is not None:
+                    visit(value, (file_nid,), ())  # `export default X` reads X
+                continue  # `export { X }` / `export * from`: names, not reads
+            inner = decl
+        if inner.type in ("lexical_declaration", "variable_declaration"):
+            for d in inner.named_children:
+                if d.type != "variable_declarator":
+                    continue
+                name, value = d.child_by_field_name("name"), d.child_by_field_name("value")
+                if name is None:
+                    continue
+                own = tuple(decls[x] for x in sorted(names_of(name)) if x in decls) or (module_owner,)
+                pattern(name, own, (), "bind")
+                if value is not None:
+                    visit(value, own, ())
+            continue
+        name = inner.child_by_field_name("name") if inner.type in _JS_NAMED_DECLS | {
+            "enum_declaration", "internal_module", "module"} else None
+        owner = decls.get(text(name)) if name is not None else None
+        visit(inner, (owner,) if owner else (module_owner,), ())
+
+    for (o, target, ctx), line in sorted(found.items()):
+        edges.append({"source": o, "target": target, "relation": "references", "context": ctx,
+                      "confidence": "EXTRACTED", "source_file": str_path, "source_location": f"L{line}",
+                      "weight": 1.0})
+
+
 # ── 2. Roles ─────────────────────────────────────────────────────────────────
 #
 # Every node gets ``role``: one of

@@ -44,6 +44,25 @@ def _rels(r, relation):
     return {(e["source"], e["target"]) for e in r["edges"] if e["relation"] == relation}
 
 
+def _assert_k_read_only_by_vendor_module(r, nid, indirect):
+    """No node outside the vendor bundle may point at its private `k`.
+
+    RLL fork divergence (2026-10, 960df3c "reach calls written at module scope"):
+    the fixture's IIFE runs at load time, so its `return{k:k}` now reaches the
+    graph as `<module scope> -indirect_call-> k` -- a true reference to the
+    bundle's own nested `k`, the same edge upstream already emits for that code
+    inside a named function (`function f(){function k(){} return{k:k}}` gives
+    `f -> f_k`). Upstream's `all(t != k)` held only because module-scope
+    statements were never walked. The property these tests guard is unchanged:
+    the shadowed local `k` in the other file must not resolve to the bundle's.
+    """
+    vendor_module = {n["id"] for n in r["nodes"]
+                     if n["label"] == "<module scope>" and "vendor.min" in n["source_file"]}
+    assert all(t != nid["k"] for s, t in indirect if s not in vendor_module)
+    assert any((s, nid["k"]) in indirect for s in vendor_module), \
+        "the bundle's own load-time read of k is a real reference and must stay"
+
+
 def test_catch_binding_emits_no_indirect_call(tmp_path):
     """Reported shape: a minified bundle's private `k` must not become a fabricated
     indirect_call target because an unrelated function names its catch binding `k`
@@ -57,7 +76,7 @@ def test_catch_binding_emits_no_indirect_call(tmp_path):
         ),
     })
     indirect = _rels(r, "indirect_call")
-    assert all(t != nid["k"] for _s, t in indirect)
+    _assert_k_read_only_by_vendor_module(r, nid, indirect)
 
 
 def test_catch_binding_destructured_emits_no_indirect_call(tmp_path):
