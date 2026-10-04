@@ -2214,6 +2214,8 @@ def _require_imports_js(node, source: bytes, importer_nid: str, stem: str, edges
                     "source_file": str_path,
                     "source_location": f"L{line}",
                     "weight": 1.0,
+                    # RLL: the symbol edges of a conditional require are conditional too
+                    **({"conditional": True} if conditional else {}),
                 })
     return found
 

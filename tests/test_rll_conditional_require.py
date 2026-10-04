@@ -45,3 +45,8 @@ def test_module_scope_require_under_a_statement_is_conditional(tmp_path: Path):
     assert by_line["L7"].get("conditional") is True, "if"
     assert by_line["L8"].get("conditional") is None, "inside a function it belongs to the function"
     assert by_line["L8"]["source"] != _file_node_id(Path("src/cli.ts")), "attributed to lazy(), not the file"
+    # the symbol-level `imports` edges (file → c, file → d) carry the same tag; a consumer
+    # that reads either relation sees the same answer
+    sym = {e["source_location"]: e for e in result["edges"] if e["relation"] == "imports" and e.get("source_file") == "src/cli.ts"}
+    assert sym["L5"].get("conditional") is True and sym["L7"].get("conditional") is True
+    assert sym["L2"].get("conditional") is None and sym["L3"].get("conditional") is None
