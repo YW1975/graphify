@@ -3808,6 +3808,21 @@ def _park_unresolved_member_call(
     parked.append(entry)
 
 
+def _occupied_pairs(edges: list[dict]) -> set[tuple]:
+    """(source, target) pairs that already hold an edge, for the member-call
+    resolvers' one-edge-per-pair dedup.
+
+    MODIFIED BY YW1975: an RLL read/write reference (`references` with context
+    read|write, symbol-level impact S3/S4) does not occupy its pair. A function
+    that both reads `ns.fn` and calls `ns.fn()` holds two facts, which the build
+    lists side by side; counting the read here dropped the call. On super-rll, 44
+    namespace-member calls (resolved by the Python resolver's module arm, which
+    runs over every raw call) vanished once S4 added cross-file reads.
+    """
+    return {(e.get("source"), e.get("target")) for e in edges
+            if not (e.get("relation") == "references" and e.get("context") in ("read", "write"))}
+
+
 def _resolve_swift_member_calls(
     per_file: list[dict],
     all_nodes: list[dict],
@@ -3918,7 +3933,7 @@ def _resolve_swift_member_calls(
     for result in per_file:
         all_raw_calls.extend(result.get("raw_calls", []))
 
-    existing_pairs = {(e.get("source"), e.get("target")) for e in all_edges}
+    existing_pairs = _occupied_pairs(all_edges)
     for rc in all_raw_calls:
         if not rc.get("is_member_call"):
             continue
@@ -4068,7 +4083,7 @@ def _resolve_python_member_calls(
         stem = Path(sf).stem if sf else ""
         return _key(stem or n.get("label", ""))
 
-    existing_pairs = {(e.get("source"), e.get("target")) for e in all_edges}
+    existing_pairs = _occupied_pairs(all_edges)
 
     def _emit_call(caller: str, target_nid: "str | None", rc: dict) -> None:
         if not target_nid or target_nid == caller or (caller, target_nid) in existing_pairs:
@@ -4207,7 +4222,7 @@ def _resolve_typescript_member_calls(
     for result in per_file:
         all_raw_calls.extend(result.get("raw_calls", []))
 
-    existing_pairs = {(e.get("source"), e.get("target")) for e in all_edges}
+    existing_pairs = _occupied_pairs(all_edges)
     for rc in all_raw_calls:
         if not rc.get("is_member_call"):
             continue
@@ -4360,7 +4375,7 @@ def _resolve_cpp_member_calls(
     for result in per_file:
         all_raw_calls.extend(result.get("raw_calls", []))
 
-    existing_pairs = {(e.get("source"), e.get("target")) for e in all_edges}
+    existing_pairs = _occupied_pairs(all_edges)
     for rc in all_raw_calls:
         if not rc.get("is_member_call"):
             continue
@@ -4596,7 +4611,7 @@ def _resolve_csharp_member_calls(
     for result in per_file:
         all_raw_calls.extend(result.get("raw_calls", []))
 
-    existing_pairs = {(e.get("source"), e.get("target")) for e in all_edges}
+    existing_pairs = _occupied_pairs(all_edges)
     for rc in all_raw_calls:
         if rc.get("lang") != "csharp" or not rc.get("is_member_call"):
             continue
@@ -4752,7 +4767,7 @@ def _resolve_java_member_calls(
         enclosing_type.setdefault(method, owner)
         method_index.setdefault((owner, key(method_node.get("label", ""))), set()).add(method)
 
-    existing_pairs = {(edge.get("source"), edge.get("target")) for edge in all_edges}
+    existing_pairs = _occupied_pairs(all_edges)
     # Inherited fields (#3151): a field declared on a superclass - possibly in
     # another file - types a `this.<field>` receiver in the subclass. Safe
     # because `this.` names a field by construction; no local can shadow it.
@@ -4942,7 +4957,7 @@ def _resolve_objc_member_calls(
     for result in per_file:
         all_raw_calls.extend(result.get("raw_calls", []))
 
-    existing_pairs = {(e.get("source"), e.get("target")) for e in all_edges}
+    existing_pairs = _occupied_pairs(all_edges)
     # A @property declared on a superclass types [self.<field> ...] in the
     # subclass too (#3151): walk the inherits chain, nearest table first.
     _objc_bases: dict[str, list[str]] = {}
@@ -5246,7 +5261,7 @@ def _resolve_kotlin_qualified_calls(
                 if n.get("_callable_class"):
                     types.setdefault(name, []).append(tgt)
 
-    existing_pairs = {(e.get("source"), e.get("target")) for e in all_edges}
+    existing_pairs = _occupied_pairs(all_edges)
     for rc in raw:
         prefix = rc["qualified_prefix"]
         callee = rc["callee"]
@@ -5563,7 +5578,7 @@ def _resolve_kotlin_member_calls(
         if name:
             types_by_name.setdefault(name, []).append(n["id"])
 
-    existing_pairs = {(e.get("source"), e.get("target")) for e in all_edges}
+    existing_pairs = _occupied_pairs(all_edges)
     for rc in raw:
         receiver = rc["kotlin_object_receiver"]
         callee = rc["callee"]
@@ -7691,6 +7706,8 @@ def extract(
         paths, all_nodes, all_edges, root,
         ambiguous_python_modules=ambiguous_python_modules,
         resolution_context_nodes=resolution_context_nodes,
+        rll_import_refs=[(path, ref) for path, result in zip(paths, per_file)
+                         for ref in result.get("rll_import_refs", ())],
     )
 
     # Merge a header-declared class (and its methods) with its sibling-impl
@@ -8402,7 +8419,7 @@ def extract(
         if _f and _f != _src_nid:
             file_to_module_imports.setdefault(_f, set()).update(_mods)
 
-    existing_pairs = {(e["source"], e["target"]) for e in all_edges}
+    existing_pairs = _occupied_pairs(all_edges)
     # Call-like pairs only, for the indirect_call dedup: an `imports` edge from a
     # file to the symbol it imports is EXPECTED and must not suppress an
     # indirect_call to that same symbol (JS/TS named imports create such an edge).

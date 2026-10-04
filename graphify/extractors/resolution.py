@@ -1151,9 +1151,11 @@ def _apply_symbol_resolution_facts(
     root: Path,
     facts: _SymbolResolutionFacts,
     resolution_context_nodes: list[dict] | None = None,
+    rll_import_refs: list | None = None,
 ) -> None:
     """Apply language-provided import/export/use facts to graph edges."""
     if not (
+        rll_import_refs or
         facts.declarations
         or facts.imports
         or facts.aliases
@@ -1643,6 +1645,28 @@ def _apply_symbol_resolution_facts(
             use_fact.line,
             use_fact.file_path,
         )
+
+    # RLL (symbol-level impact S4): reads of an imported name, recorded per file by
+    # `annotate_same_file_reads` with the owner that reads it. The specifier is resolved
+    # here, where every file is known, and the name followed through re-exports and
+    # `export *` to the declaration that defines it. `imported == "*"` is a whole
+    # namespace / module object read as a value: it reads the module, i.e. its file node.
+    for ref_path, ref in rll_import_refs or ():
+        owner = ref.get("owner")
+        if owner not in owned:
+            continue
+        target_path = _resolve_js_module_path(ref["spec"], Path(ref_path).parent)
+        if target_path is None:
+            continue  # a bare external package: nothing in the corpus defines it
+        target_path = _resolve_cached(target_path)
+        if ref["imported"] == "*":
+            target_id = source_file_id.get(target_path)
+        else:
+            origin = resolve_exported_origin(target_path, ref["imported"])
+            target_id = None if origin in member_symbol_keys else symbol_nodes.get(origin)
+        if target_id is None or target_id == owner:
+            continue
+        add_edge(owner, target_id, "references", ref["ctx"], ref["line"], Path(ref_path))
 
 def _parse_js_tree(path: Path):
     try:
@@ -2648,6 +2672,7 @@ def _augment_symbol_resolution_edges(
     root: Path,
     ambiguous_python_modules: set[str] | None = None,
     resolution_context_nodes: list[dict] | None = None,
+    rll_import_refs: list | None = None,
 ) -> None:
     facts = _SymbolResolutionFacts()
     _collect_js_symbol_resolution_facts(paths, facts)
@@ -2655,13 +2680,17 @@ def _augment_symbol_resolution_edges(
         paths, root, facts,
         ambiguous_python_modules=ambiguous_python_modules,
     )
+    # Passed only when there is something to resolve, so the call keeps its shape for
+    # callers and wrappers that predate it.
+    extra = {"rll_import_refs": rll_import_refs} if rll_import_refs else {}
     if resolution_context_nodes:
         _apply_symbol_resolution_facts(
             paths, nodes, edges, root, facts,
             resolution_context_nodes=resolution_context_nodes,
+            **extra,
         )
     else:
-        _apply_symbol_resolution_facts(paths, nodes, edges, root, facts)
+        _apply_symbol_resolution_facts(paths, nodes, edges, root, facts, **extra)
 
 def _resolve_cross_file_imports(
     per_file: list[dict],

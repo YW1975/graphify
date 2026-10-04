@@ -7282,9 +7282,16 @@ def _extract_generic(
                                      make_id=_make_id, nid_of=js_nid)
         # RLL: same-file reads of those declarations (design §3.2 item 2).
         from graphify.rll_granularity import annotate_same_file_reads
+        _rll_import_refs: list = []
         annotate_same_file_reads(root, source, nodes, edges, function_bodies=function_bodies,
                                  initializer_nodes=initializer_nodes, file_nid=file_nid,
-                                 module_nid=_module_nid, str_path=str_path)
+                                 module_nid=_module_nid, str_path=str_path,
+                                 import_refs=_rll_import_refs)
+        if _rll_import_refs:
+            # Reads of imported names, resolved to their definitions by the corpus pass
+            # (`_apply_symbol_resolution_facts`). JS/TS files bypass the AST cache
+            # (`_JS_CACHE_BYPASS_SUFFIXES`), so this is recomputed on every run.
+            result["rll_import_refs"] = _rll_import_refs
         # The edge clean-up above already built ``result["edges"]``; an edge these
         # passes appended to ``edges`` (a new declaration's `contains`, a read)
         # never reached the result. Same validity rule as the clean-up.

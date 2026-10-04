@@ -128,7 +128,9 @@ def _is_import_binding(value) -> bool:
     Giving such a binding its own node would collide with the definition it only imports
     (the base extractor documents this trap for destructured requires, #2604)."""
     v = value
-    while v is not None and v.type in ("await_expression", "member_expression", "parenthesized_expression"):
+    # `require('./x') as T` is still the import (a cast is how TS types a CommonJS require).
+    while v is not None and v.type in ("await_expression", "member_expression", "parenthesized_expression",
+                                       "as_expression", "satisfies_expression", "non_null_expression"):
         v = next((c for c in v.children if c.is_named), None)
     if v is None or v.type != "call_expression":
         return False
@@ -359,7 +361,8 @@ _JS_NAMED_DECLS = frozenset({
 
 
 def annotate_same_file_reads(root, source: bytes, nodes: list, edges: list, *, function_bodies,
-                             initializer_nodes, file_nid: str, module_nid: str, str_path: str) -> None:
+                             initializer_nodes, file_nid: str, module_nid: str, str_path: str,
+                             import_refs: list | None = None) -> None:
     from graphify.extractors.engine import (
         _js_collect_pattern_idents, _js_direct_lexical_names, _js_local_bound_names,
     )
@@ -376,8 +379,6 @@ def annotate_same_file_reads(root, source: bytes, nodes: list, edges: list, *, f
     for n in nodes:
         if n.get("source_file") == str_path and n.get("decl_name") and n.get("decl_kind") != "type":
             decls.setdefault(n["decl_name"], n["id"])
-    if not decls:
-        return
     present = {n.get("id") for n in nodes}
     module_owner = module_nid if module_nid in present else file_nid
 
@@ -397,13 +398,33 @@ def annotate_same_file_reads(root, source: bytes, nodes: list, edges: list, *, f
             owner_of.setdefault(key(init), (nid,))
 
     found: dict[tuple[str, str, str], int] = {}
+    imported: dict[tuple[str, str, str, str], int] = {}
+
+    def import_ref(owners, spec: str, name: str, ctx: str, line: int, via: str) -> None:
+        for o in owners:
+            k = (o, spec, name, ctx)
+            if k not in imported or line < imported[k][0]:
+                imported[k] = (line, via)
+
+    def binding_of(name: str, scopes):
+        """The innermost binding of ``name``: None for a plain local, (spec, imported, via)
+        for an import / namespace / require binding, or ``False`` when nothing binds it."""
+        for s in reversed(scopes):
+            if name in s:
+                return s.get(name) if isinstance(s, dict) else None
+        return False
 
     def ref(ident, owners, scopes, ctx: str) -> None:
         name = text(ident)
-        target = decls.get(name)
-        if target is None or any(name in s for s in scopes):
-            return
         line = ident.start_point[0] + 1
+        bound = binding_of(name, scopes)
+        if bound is not False:
+            if bound and ctx == "read":
+                import_ref(owners, bound[0], bound[1], ctx, line, bound[2])  # resolved across files later
+            return
+        target = decls.get(name)
+        if target is None:
+            return
         for o in owners:
             if o != target:
                 k = (o, target, ctx)
@@ -414,6 +435,91 @@ def annotate_same_file_reads(root, source: bytes, nodes: list, edges: list, *, f
         bound: set[str] = set()
         _js_collect_pattern_idents(pattern, source, bound)
         return frozenset(bound)
+
+    def require_spec(n) -> str | None:
+        """`require('./m')` -> './m'."""
+        if n is None or n.type != "call_expression":
+            return None
+        fn, args = n.child_by_field_name("function"), n.child_by_field_name("arguments")
+        if fn is None or fn.type != "identifier" or text(fn) != "require" or args is None:
+            return None
+        first = next((a for a in args.named_children if a.type != "comment"), None)
+        if first is None or first.type != "string":
+            return None
+        return text(first)[1:-1] or None
+
+    def require_value(value):
+        """(spec, member) for `require('./m')` (member None) or `require('./m').x`."""
+        v = value
+        while v is not None and v.type in ("parenthesized_expression", "await_expression", "as_expression",
+                                           "satisfies_expression", "non_null_expression"):
+            v = next((c for c in v.named_children if c.type != "comment"), None)
+        member = None
+        if v is not None and v.type == "member_expression":
+            prop = v.child_by_field_name("property")
+            if prop is None or prop.type != "property_identifier":
+                return None
+            member, v = text(prop), v.child_by_field_name("object")
+        spec = require_spec(v)
+        return (spec, member) if spec else None
+
+    def require_bindings(holder) -> dict:
+        """Names bound by `const|let|var <pattern> = require(...)` directly in ``holder``."""
+        out: dict = {}
+        for decl in holder.named_children:
+            if decl.type not in ("lexical_declaration", "variable_declaration"):
+                continue
+            for d in decl.named_children:
+                if d.type != "variable_declarator":
+                    continue
+                req = require_value(d.child_by_field_name("value"))
+                name = d.child_by_field_name("name")
+                if req is None or name is None:
+                    continue
+                spec, member = req
+                if name.type == "identifier":
+                    out[text(name)] = (spec, member or "*", "require")
+                elif name.type == "object_pattern" and member is None:
+                    for prop in name.named_children:
+                        if prop.type == "shorthand_property_identifier_pattern":
+                            out[text(prop)] = (spec, text(prop), "require")
+                        elif prop.type == "object_assignment_pattern":
+                            left = prop.child_by_field_name("left")
+                            if left is not None:
+                                out[text(left)] = (spec, text(left), "require")
+                        elif prop.type == "pair_pattern":
+                            k, v = prop.child_by_field_name("key"), prop.child_by_field_name("value")
+                            if k is not None and v is not None and v.type == "identifier" \
+                                    and k.type == "property_identifier":
+                                out[text(v)] = (spec, text(k), "require")
+        return out
+
+    def import_bindings() -> dict:
+        """Top-level `import` clauses and `require` declarators of this file."""
+        out = require_bindings(root)
+        for stmt in root.named_children:
+            if stmt.type != "import_statement":
+                continue
+            src = stmt.child_by_field_name("source")
+            clause = next((c for c in stmt.named_children if c.type == "import_clause"), None)
+            if src is None or clause is None:
+                continue
+            spec = text(src)[1:-1]
+            for c in clause.named_children:
+                if c.type == "identifier":
+                    out[text(c)] = (spec, "default", "import")
+                elif c.type == "namespace_import":
+                    ident = next((x for x in c.named_children if x.type == "identifier"), None)
+                    if ident is not None:
+                        out[text(ident)] = (spec, "*", "namespace")
+                elif c.type == "named_imports":
+                    for sp in c.named_children:
+                        if sp.type != "import_specifier":
+                            continue
+                        name, alias = sp.child_by_field_name("name"), sp.child_by_field_name("alias")
+                        if name is not None:
+                            out[text(alias if alias is not None else name)] = (spec, text(name), "import")
+        return out
 
     def pattern(n, owners, scopes, mode: str) -> None:
         """A binding (mode "bind") or assignment target (mode "write"): its names are
@@ -482,8 +588,13 @@ def annotate_same_file_reads(root, source: bytes, nodes: list, edges: list, *, f
                 for c in holder.named_children:
                     if c.type in _JS_NAMED_DECLS and c.child_by_field_name("name") is not None:
                         local.add(text(c.child_by_field_name("name")))
+            required = {}
+            for holder in ([n] if t != "switch_body" else n.named_children):
+                required.update(require_bindings(holder))
             if local:
-                scopes = scopes + (frozenset(local),)
+                scopes = scopes + (frozenset(local - required.keys()),)
+            if required:
+                scopes = scopes + (required,)  # a lazy require binds its import, not a local
         elif t == "for_in_statement":
             left, right, body = (n.child_by_field_name(f) for f in ("left", "right", "body"))
             if right is not None:
@@ -544,6 +655,19 @@ def annotate_same_file_reads(root, source: bytes, nodes: list, edges: list, *, f
                 if name is None or key(c) != key(name):
                     visit(c, owners, scopes)
             return
+        elif t == "member_expression":
+            obj, prop = n.child_by_field_name("object"), n.child_by_field_name("property")
+            if prop is not None and prop.type == "property_identifier" and obj is not None:
+                line = prop.start_point[0] + 1
+                if obj.type == "identifier":
+                    bound = binding_of(text(obj), scopes)
+                    if bound and bound[1] == "*":
+                        import_ref(owners, bound[0], text(prop), "read", line, bound[2])  # `ns.X` reads X
+                        return
+                spec = require_spec(obj)
+                if spec:
+                    import_ref(owners, spec, text(prop), "read", line, "require")  # `require('./m').X`
+                    return
         elif t == "pair":
             k, v = n.child_by_field_name("key"), n.child_by_field_name("value")
             if k is not None and k.type == "computed_property_name":
@@ -563,14 +687,17 @@ def annotate_same_file_reads(root, source: bytes, nodes: list, edges: list, *, f
         for c in n.named_children:
             visit(c, owners, scopes)
 
+    base = (import_bindings(),)
     for stmt in root.named_children:
         inner = stmt
+        if stmt.type == "import_statement":
+            continue
         if stmt.type == "export_statement":
             decl = stmt.child_by_field_name("declaration")
             if decl is None:
                 value = stmt.child_by_field_name("value")
                 if value is not None:
-                    visit(value, (file_nid,), ())  # `export default X` reads X
+                    visit(value, (file_nid,), base)  # `export default X` reads X
                 continue  # `export { X }` / `export * from`: names, not reads
             inner = decl
         if inner.type in ("lexical_declaration", "variable_declaration"):
@@ -581,15 +708,19 @@ def annotate_same_file_reads(root, source: bytes, nodes: list, edges: list, *, f
                 if name is None:
                     continue
                 own = tuple(decls[x] for x in sorted(names_of(name)) if x in decls) or (module_owner,)
-                pattern(name, own, (), "bind")
+                pattern(name, own, base, "bind")
                 if value is not None:
-                    visit(value, own, ())
+                    visit(value, own, base)  # a local `require` (createRequire) is still read
             continue
         name = inner.child_by_field_name("name") if inner.type in _JS_NAMED_DECLS | {
             "enum_declaration", "internal_module", "module"} else None
         owner = decls.get(text(name)) if name is not None else None
-        visit(inner, (owner,) if owner else (module_owner,), ())
+        visit(inner, (owner,) if owner else (module_owner,), base)
 
+    if import_refs is not None:
+        for (o, spec, name, ctx), (line, via) in sorted(imported.items()):
+            import_refs.append({"owner": o, "spec": spec, "imported": name, "ctx": ctx, "line": line,
+                                "via": via})
     for (o, target, ctx), line in sorted(found.items()):
         edges.append({"source": o, "target": target, "relation": "references", "context": ctx,
                       "confidence": "EXTRACTED", "source_file": str_path, "source_location": f"L{line}",
