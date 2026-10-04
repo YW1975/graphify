@@ -170,7 +170,7 @@ class _Collector:
         SAME node, so "who invokes this" is one traversal. Definition nodes get
         a per-file id prefix, which would mint `status` once per citing file —
         observed as 101 command nodes for 38 distinct commands, and 38 tier
-        nodes for 8 tiers. Omitting `source_file` marks these as the reference
+        nodes for 8 tiers. An empty `source_file` marks these as the reference
         stubs upstream already recognizes (extract.py: "sourceless reference
         stubs are not definitions"), so they stay un-prefixed and collapse by
         name. The citing file is not lost — it is on the edge.
@@ -181,21 +181,25 @@ class _Collector:
             # file and the pipeline namespaces its id by the file, which mints
             # `status` once per citing skill (observed: 101 command nodes for
             # 38 commands). A concept is the referent itself, so the id stays
-            # bare and every citer converges on one node. `source_file` is a
-            # required field — it records who named it first, while each edge
-            # keeps its own citing file.
+            # bare and every citer converges on one node. Each edge keeps its own
+            # citing file.
             self.nodes.append({
                 "id": nid, "label": label, "file_type": "concept",
-                # NO `source_file`: upstream's own model for an entity a file
-                # merely names ("sourceless reference stubs are not
-                # definitions"). A constant placeholder path looked tidier and
-                # kept the schema quiet, but it is not a file the corpus
-                # contains — so the incremental rebuild collected every
-                # referent as "deleted or excluded source file" and took the
-                # invokes edges with it (42 command nodes → 0 on the second
-                # `graph sync`). Sourceless stubs are pruned only at degree 0,
-                # and a referent exists precisely because something points at
-                # it. The citing file is carried by each edge.
+                # An EMPTY `source_file`, exactly as upstream's own stubs are
+                # minted (build.py, extractors/csharp.py, sql.py, …): the key
+                # satisfies the schema validator, and the empty value is what
+                # every "is this a stub" check reads. Omitting the key printed
+                # "missing required field 'source_file'" once per referent on
+                # every build (106 per sync). A constant placeholder path was
+                # worse: it is not a file the corpus contains, so the
+                # incremental rebuild collected every referent as "deleted or
+                # excluded source file" and took the invokes edges with it (42
+                # command nodes → 0 on the second `graph sync`); an empty value
+                # never matches a prune entry (build.py `_prune_match`).
+                # Sourceless stubs are pruned only at degree 0, and a referent
+                # exists precisely because something points at it. The citing
+                # file is carried by each edge.
+                "source_file": "",
                 "source_location": "L1",
 })
         return nid
