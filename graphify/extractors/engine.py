@@ -2101,7 +2101,30 @@ def _find_require_call(value_node):
         return _find_require_call(obj)
     return None
 
-def _require_imports_js(node, source: bytes, importer_nid: str, stem: str, edges: list, str_path: str) -> bool:
+# RLL: statement kinds under which a module-scope `require()` runs only when the branch,
+# loop or handler runs. A plain `{ … }` block, a labelled statement or a bare expression at
+# module scope is NOT in this set: it executes on load, so it keeps the unconditional
+# meaning. Only a node that is DEFINITELY inside one of these is tagged — a miss leaves
+# the require unconditional, which a consumer must treat as the wider (safe) case.
+_JS_CONDITIONAL_STATEMENTS = frozenset({
+    "if_statement", "switch_case", "switch_default", "try_statement", "catch_clause",
+    "finally_clause", "for_statement", "for_in_statement", "while_statement", "do_statement",
+})
+
+
+def _js_require_is_conditional(node) -> bool:
+    """True when ``node`` sits under a conditional statement before reaching the program root
+    (or a function boundary, which the caller already rules out)."""
+    cur = node.parent
+    while cur is not None and cur.type != "program":
+        if cur.type in _JS_CONDITIONAL_STATEMENTS:
+            return True
+        cur = cur.parent
+    return False
+
+
+def _require_imports_js(node, source: bytes, importer_nid: str, stem: str, edges: list, str_path: str,
+                        *, conditional: bool = False) -> bool:
     """Detect CommonJS require imports inside lexical_declaration / variable_declaration.
 
     Handles three patterns:
@@ -2150,6 +2173,10 @@ def _require_imports_js(node, source: bytes, importer_nid: str, stem: str, edges
             "source_location": f"L{line}",
             "weight": 1.0,
         }
+        if conditional:
+            # RLL: module scope, but under an if / switch case / try / loop — it loads only
+            # when that statement runs, which a static consumer cannot see otherwise.
+            edge["conditional"] = True
         # Key the target salt by the resolved target file so a same-basename
         # cross-extension sibling isn't mis-salted onto the importer (#1814).
         if resolved_path is not None:
@@ -6149,10 +6176,14 @@ def _extract_generic(
             # same (source, target) pair, and the DiGraph keeps one: the call
             # disappears. Inside a function body the dependency still belongs
             # to the enclosing callable, as before.
+            _at_module_scope = caller_nid == _module_nid_box.get("id")
             _require_imports_js(
                 node, source,
-                file_nid if caller_nid == _module_nid_box.get("id") else caller_nid,
+                file_nid if _at_module_scope else caller_nid,
                 stem, edges, str_path,
+                # RLL: a module-scope require under a conditional statement is tagged; one
+                # inside a function already belongs to that function and is never tagged.
+                conditional=_at_module_scope and _js_require_is_conditional(node),
             )
 
         if node.type in config.call_types:
