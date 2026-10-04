@@ -844,6 +844,30 @@ def _import_js(node, source: bytes, file_nid: str, stem: str, edges: list, str_p
     is_type_only = any(
         child.type == "type" and not child.is_named for child in node.children
     )
+
+    # RLL (2026-10): an explicit value|type kind per binding. `type_only` was stamped
+    # only on the file-level edge of `import type …`; the per-symbol `imports` edges and
+    # inline `{ type A, B }` specifiers carried nothing, so a consumer could not tell a
+    # type-only dependency from a runtime one (symbol-level impact design §3.2 item 0).
+    def _spec_is_type(spec) -> bool:
+        return any(c.type == "type" and not c.is_named for c in spec.children)
+
+    def _all_bindings_type() -> bool:
+        # A statement whose every binding is an inline `type` specifier, with no default
+        # or namespace binding, is elided from the emitted JS just like `import type`.
+        specs, other = [], False
+        for child in node.children:
+            if child.type in ("import_clause", "export_clause"):
+                for sub in child.children:
+                    if sub.type == "named_imports":
+                        specs += [x for x in sub.children if x.type == "import_specifier"]
+                    elif sub.type in ("identifier", "namespace_import"):
+                        other = True
+                    elif sub.type == "export_specifier":
+                        specs.append(sub)
+        return bool(specs) and not other and all(_spec_is_type(x) for x in specs)
+
+    statement_kind = "type" if (is_type_only or _all_bindings_type()) else "value"
     resolved_path: "Path | None" = None
     module_string = None
     for child in node.children:
@@ -886,7 +910,8 @@ def _import_js(node, source: bytes, file_nid: str, stem: str, edges: list, str_p
             # back onto the importer's own variant, a phantom self-loop (#1814).
             if resolved_path is not None:
                 edge["target_file"] = str(resolved_path)
-            if is_type_only:
+            edge["import_kind"] = statement_kind
+            if statement_kind == "type":
                 edge["type_only"] = True
             edges.append(edge)
 
@@ -912,8 +937,10 @@ def _import_js(node, source: bytes, file_nid: str, stem: str, edges: list, str_p
                                 sym = _read_text(name_node, source)
                                 if sym == "default":
                                     continue  # skip default re-exports for ID matching
+                                _kind = "type" if (is_type_only or _spec_is_type(spec)) else "value"
                                 edges.append({
-                                    **({"type_only": True} if is_type_only else {}),
+                                    **({"type_only": True} if _kind == "type" else {}),
+                                    "import_kind": _kind,
                                     "source": file_nid,
                                     "target": _make_id(target_stem, sym),
                                     "relation": "re_exports",
@@ -940,7 +967,10 @@ def _import_js(node, source: bytes, file_nid: str, stem: str, edges: list, str_p
                                     name_node = spec.child_by_field_name("name")
                                     if name_node:
                                         sym = _read_text(name_node, source)
+                                        _kind = "type" if (is_type_only or _spec_is_type(spec)) else "value"
                                         edges.append({
+                                            **({"type_only": True} if _kind == "type" else {}),
+                                            "import_kind": _kind,
                                             "source": file_nid,
                                             "target": _make_id(target_stem, sym),
                                             "relation": "imports",
@@ -7962,11 +7992,17 @@ def extract(
                 # target_file is a transient stamp (#1814/#1983); exclude it
                 # from twin identity or an alias edge (stamped) never matches
                 # the canonical twin the shared resolver emits (unstamped).
+                # RLL: import_kind / type_only (per-binding facts stamped by _import_js)
+                # are not part of twin identity either; when the alias twin is dropped,
+                # the kept canonical edge inherits them below.
                 return json.dumps(
-                    {k: v for k, v in edge.items() if k != "target_file"},
+                    {k: v for k, v in edge.items() if k not in ("target_file", "import_kind", "type_only")},
                     sort_keys=True, separators=(",", ":"), default=str,
                 )
             edge_key_counts = Counter(_edge_key(edge) for edge in all_edges)
+            edges_by_key: dict[str, list[dict]] = {}
+            for _e in all_edges:
+                edges_by_key.setdefault(_edge_key(_e), []).append(_e)
             owned_node_ids = {node.get("id") for node in all_nodes}
             deduped_edges: list[dict] = []
             for edge in all_edges:
@@ -7990,6 +8026,10 @@ def extract(
                     if edge_key_counts[twin_key]:
                         if edge.get("target") in owned_node_ids:
                             edge_key_counts[twin_key] -= 1
+                        for _twin in edges_by_key.get(twin_key, []):
+                            for _k in ("import_kind", "type_only"):
+                                if _k in edge and _k not in _twin:
+                                    _twin[_k] = edge[_k]
                         continue
                 deduped_edges.append(edge)
             all_edges[:] = deduped_edges

@@ -7255,6 +7255,12 @@ def _extract_generic(
     # RLL: first..last line of every callable / class, so a diff hunk maps to it.
     from graphify.rll_granularity import annotate_source_ranges
     annotate_source_ranges(nodes, def_nodes, function_bodies, (file_nid, _module_nid))
+    if config.ts_module in ("tree_sitter_javascript", "tree_sitter_typescript"):
+        # RLL: every top-level declaration gets a node and a range; load-time effects are recorded.
+        from graphify.rll_granularity import annotate_module_declarations
+        annotate_module_declarations(root, source, nodes, edges, seen_ids, file_nid=file_nid,
+                                     module_nid=_module_nid, stem=stem, str_path=str_path,
+                                     make_id=_make_id, nid_of=js_nid)
     if callable_def_nids:
         # Mark function / method / class defs with a `_callable` attribute so the
         # cross-file indirect_call pass can resolve a by-name callback only to a real

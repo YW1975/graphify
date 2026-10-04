@@ -38,8 +38,12 @@ function helper() {
         "LOGICAL",
         "TERNARY",
     } <= labels
-    assert "internalScalar" not in labels
-    assert "localScalar" not in labels
+    # RLL fork divergence (2026-10, symbol-level impact design §3.2): every module-level
+    # declaration gets a node so a change to it can be attributed. Upstream suppresses
+    # non-exported scalars as noise; here they are declaration nodes, marked as data.
+    node = next(n for n in result["nodes"] if n["label"] == "internalScalar")
+    assert node["decl_kind"] == "data" and node["source_range"]
+    assert "localScalar" not in labels  # a function's local is not a module declaration
 
 
 def test_exported_scalar_fix_skips_unsupported_binding_patterns(tmp_path):

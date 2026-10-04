@@ -1269,6 +1269,9 @@ def _apply_symbol_resolution_facts(
         # Erased at compile time (#3123): Import Cycles skips these edges.
         if type_only:
             edge["type_only"] = True
+        # RLL (2026-10): import-family edges always state their kind (design §3.2 item 0).
+        if relation in ("imports", "imports_from", "re_exports"):
+            edge["import_kind"] = "type" if type_only else "value"
         edges.append(edge)
 
     for declaration in facts.declarations:

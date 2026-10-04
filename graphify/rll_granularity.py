@@ -87,6 +87,234 @@ def annotate_source_ranges(
             n["source_range"] = [start, max(start, body_end[nid])]
 
 
+# ── 1b. Module-level declarations (TS/JS) ────────────────────────────────────
+#
+# Symbol-level impact (RLL design 2026-10-04 §3.2): a change at module scope must be
+# attributable to the declaration it touches. The base extractor gives a node and a
+# range only to callables and types; data constants have a node only when exported or
+# object/array/call-initialised, and never a range; scalars, `let` and `var` have no
+# node at all. This pass, run after the base walk, gives EVERY top-level declarator a
+# node with ``source_range``, ``decl_kind``, ``decl_name`` and ``load_effect``, and
+# records the ranges of top-level statements that run code on load as
+# ``effect_ranges`` on the ``<module scope>`` node. It only adds facts: no existing
+# node or edge is renamed, and new nodes are not entered into any resolution table.
+
+_JS_FUNCTION_VALUES = {"arrow_function", "function_expression", "function", "generator_function"}
+_JS_FUNCTION_BODIES = _JS_FUNCTION_VALUES | {"method_definition", "class_body"}
+_JS_EFFECT_NODES = {"call_expression", "new_expression", "await_expression"}
+_JS_TYPE_DECLS = {"interface_declaration", "type_alias_declaration"}
+_JS_EFFECT_STATEMENTS = {
+    "expression_statement", "if_statement", "for_statement", "for_in_statement",
+    "while_statement", "do_statement", "switch_statement", "try_statement",
+    "labeled_statement", "throw_statement", "statement_block",
+}
+
+
+def _runs_code(node) -> bool:
+    """Whether evaluating ``node`` at load time can run code: a call, ``new``, ``await``
+    (a tagged template is a call). Function and class bodies are not entered — they run
+    when called, not when the module loads."""
+    if node is None:
+        return False
+    if node.type in _JS_EFFECT_NODES:
+        return True
+    if node.type in _JS_FUNCTION_BODIES:
+        return False
+    return any(_runs_code(c) for c in node.children)
+
+
+def _is_import_binding(value) -> bool:
+    """`require('./x')`, `require('./x').y`, `await import('./x')`: an import, not a declaration.
+    Giving such a binding its own node would collide with the definition it only imports
+    (the base extractor documents this trap for destructured requires, #2604)."""
+    v = value
+    while v is not None and v.type in ("await_expression", "member_expression", "parenthesized_expression"):
+        v = next((c for c in v.children if c.is_named), None)
+    if v is None or v.type != "call_expression":
+        return False
+    fn = v.child_by_field_name("function")
+    return fn is not None and fn.type in ("identifier", "import") and fn.text in (b"require", b"import")
+
+
+def _class_runs_code(cls) -> bool:
+    body = cls.child_by_field_name("body")
+    if any(c.type == "decorator" for c in cls.children):
+        return True
+    if body is None:
+        return False
+    for member in body.children:
+        if member.type in ("class_static_block", "static_block"):
+            return True
+        if member.type == "decorator":
+            return True
+        if member.type in ("public_field_definition", "field_definition"):
+            is_static = any(c.type == "static" for c in member.children)
+            if is_static and _runs_code(member.child_by_field_name("value")):
+                return True
+    return False
+
+
+def annotate_module_declarations(root, source: bytes, nodes: list, edges: list, seen_ids: set, *,
+                                 file_nid: str, module_nid: str, stem: str, str_path: str,
+                                 make_id, nid_of) -> None:
+    if root is None or root.type != "program":
+        return
+
+    def text(n) -> str:
+        return source[n.start_byte:n.end_byte].decode("utf-8", errors="replace")
+
+    def find(label: str, line: int) -> dict | None:
+        for n in nodes:
+            if n.get("source_file") == str_path and n.get("label") == label and _line_of(n) == line:
+                return n
+        return None
+
+    def stamp(node: dict, *, rng: list[int], kind: str, name: str, effect: bool) -> None:
+        node.setdefault("source_range", rng)
+        node["decl_kind"] = kind
+        node["decl_name"] = name
+        node["load_effect"] = "impure" if effect else "pure"
+
+    def declare(name: str, line: int, rng: list[int], kind: str, effect: bool, *, create: bool = True) -> None:
+        existing = find(name, line) or find(f"{name}()", line)
+        if existing is not None:
+            stamp(existing, rng=rng, kind=kind, name=name, effect=effect)
+            return
+        # A name that normalizes to nothing (minified `$`, `_`) would collapse the id to the
+        # file stem and leak the scan path (#1899): no node, as the base extractor does.
+        if not create or not make_id(name):
+            return
+        nid = nid_of(make_id(stem, name), name)
+        if nid in seen_ids:
+            # Same name as another declaration of this file (interface + const merging):
+            # a distinct, deterministic id; ``decl_name`` keeps the name for lookups.
+            nid = make_id(stem, f"{name}__value")
+            if nid in seen_ids:
+                return
+        seen_ids.add(nid)
+        node = {"id": nid, "label": name, "file_type": "code", "source_file": str_path,
+                "source_location": f"L{line}"}
+        stamp(node, rng=rng, kind=kind, name=name, effect=effect)
+        nodes.append(node)
+        edges.append({"source": file_nid, "target": nid, "relation": "contains", "context": "contains",
+                      "confidence": "EXTRACTED", "source_file": str_path, "source_location": f"L{line}",
+                      "weight": 1.0})
+
+    effect_ranges: list[list[int]] = []
+    for stmt in root.children:
+        decl = stmt
+        if stmt.type == "export_statement":
+            inner = stmt.child_by_field_name("declaration")
+            if inner is not None:
+                decl = inner
+            else:
+                value = stmt.child_by_field_name("value")
+                # `export default <expression>`: declarative unless evaluating it runs code.
+                if value is not None and _runs_code(value):
+                    effect_ranges.append([stmt.start_point[0] + 1, stmt.end_point[0] + 1])
+                continue
+        s_line, e_line = stmt.start_point[0] + 1, stmt.end_point[0] + 1
+        t = decl.type
+        if t in ("lexical_declaration", "variable_declaration"):
+            declarators = [c for c in decl.children if c.type == "variable_declarator"]
+            for d in declarators:
+                name_node = d.child_by_field_name("name")
+                value = d.child_by_field_name("value")
+                rng = [s_line, e_line] if len(declarators) == 1 else [d.start_point[0] + 1, d.end_point[0] + 1]
+                kind = "function" if value is not None and value.type in _JS_FUNCTION_VALUES else "data"
+                effect = _runs_code(value) if kind == "data" else False
+                line = d.start_point[0] + 1
+                if _is_import_binding(value):
+                    continue
+                if name_node is not None and name_node.type == "identifier":
+                    declare(text(name_node), line, rng, kind, effect)
+                elif name_node is not None and name_node.type in ("object_pattern", "array_pattern"):
+                    if stmt.type == "export_statement":
+                        # Exported destructuring is named by the exported KEY and skips
+                        # `...rest` / defaulted entries (#2604): annotate those nodes only.
+                        for ident in _decl_pattern_keys(name_node, text):
+                            declare(ident, line, rng, "data", effect, create=False)
+                    else:
+                        for ident in _decl_pattern_names(name_node, text):
+                            declare(ident, line, rng, "data", effect)
+                if effect:
+                    effect_ranges.append(rng)
+        elif t in ("function_declaration", "generator_function_declaration"):
+            name_node = decl.child_by_field_name("name")
+            if name_node is not None:
+                declare(text(name_node), decl.start_point[0] + 1, [s_line, e_line], "function", False)
+        elif t in ("class_declaration", "abstract_class_declaration"):
+            name_node = decl.child_by_field_name("name")
+            effect = _class_runs_code(decl)
+            if name_node is not None:
+                declare(text(name_node), decl.start_point[0] + 1, [s_line, e_line], "class", effect)
+            if effect:
+                effect_ranges.append([s_line, e_line])
+        elif t in _JS_TYPE_DECLS or t == "enum_declaration":
+            name_node = decl.child_by_field_name("name")
+            if name_node is not None:
+                declare(text(name_node), decl.start_point[0] + 1, [s_line, e_line],
+                        "enum" if t == "enum_declaration" else "type", False)
+        elif t in ("internal_module", "module"):
+            name_node = decl.child_by_field_name("name")
+            if name_node is not None:
+                declare(text(name_node), decl.start_point[0] + 1, [s_line, e_line], "namespace", _runs_code(decl))
+        elif t == "import_statement":
+            # A bare `import './x'` exists only to run that module's top level.
+            if not any(c.type in ("import_clause", "import_require_clause") for c in decl.children):
+                effect_ranges.append([s_line, e_line])
+        elif t in _JS_EFFECT_STATEMENTS:
+            effect_ranges.append([s_line, e_line])
+
+    if not effect_ranges:
+        return
+    module = next((n for n in nodes if n.get("id") == module_nid), None)
+    if module is None:
+        seen_ids.add(module_nid)
+        module = {"id": module_nid, "label": "<module scope>", "file_type": "code",
+                  "source_file": str_path, "source_location": "L1"}
+        nodes.append(module)
+        edges.append({"source": file_nid, "target": module_nid, "relation": "contains", "context": "contains",
+                      "confidence": "EXTRACTED", "source_file": str_path, "source_location": "L1", "weight": 1.0})
+    module["effect_ranges"] = effect_ranges
+
+
+def _decl_pattern_keys(pattern, text) -> list[str]:
+    """Exported names of an object pattern: shorthand names and pair KEYS."""
+    out = []
+    for prop in pattern.named_children:
+        if prop.type == "shorthand_property_identifier_pattern":
+            out.append(text(prop))
+        elif prop.type == "pair_pattern":
+            key = prop.child_by_field_name("key")
+            if key is not None:
+                out.append(text(key))
+    return out
+
+
+def _decl_pattern_names(pattern, text) -> list[str]:
+    """Binding names in a destructuring pattern (defaults and nested patterns included)."""
+    out: list[str] = []
+    stack = [pattern]
+    while stack:
+        n = stack.pop()
+        if n.type in ("shorthand_property_identifier_pattern", "identifier"):
+            out.append(text(n))
+            continue
+        if n.type == "pair_pattern":
+            v = n.child_by_field_name("value")
+            if v is not None:
+                stack.append(v)
+            continue
+        if n.type in ("assignment_pattern", "object_assignment_pattern"):
+            left = n.child_by_field_name("left")
+            if left is not None:
+                stack.append(left)
+            continue
+        stack.extend(c for c in n.children if c.is_named)
+    return sorted(set(out))
+
+
 # ── 2. Roles ─────────────────────────────────────────────────────────────────
 #
 # Every node gets ``role``: one of
