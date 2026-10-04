@@ -3265,6 +3265,7 @@ def dispatch_command(cmd: str) -> None:
         global_merge = False
         code_only = False
         no_gitignore = False
+        cli_directed: bool | None = None  # RLL: `--directed` / `--undirected` for extract
         global_repo_tag: str | None = None
         # Performance/tuning knobs (issue #792). None means "use library default".
         cli_max_workers: int | None = None
@@ -3382,6 +3383,10 @@ def dispatch_command(cmd: str) -> None:
                 cli_allow_partial = True; i += 1
             elif a == "--timing":
                 cli_timing = True; i += 1
+            elif a == "--directed":
+                cli_directed = True; i += 1
+            elif a == "--undirected":
+                cli_directed = False; i += 1
             else:
                 i += 1
 
@@ -3430,6 +3435,7 @@ def dispatch_command(cmd: str) -> None:
             _write_build_config as _write_build_cfg,
             _read_build_excludes as _read_build_ex,
             _read_build_gitignore as _read_build_gi,
+            _read_build_directed as _read_build_dir,
         )
         # #1971 persistence: an explicit --no-gitignore persists False; a later
         # flag-less `graphify extract` must NOT clobber it back to True, which
@@ -3441,10 +3447,14 @@ def dispatch_command(cmd: str) -> None:
         _effective_gitignore = False if no_gitignore else _read_build_gi(graphify_out)
         # An explicit list replaces the persisted one; omission reuses it.
         _effective_excludes = cli_excludes or _read_build_ex(graphify_out)
+        # RLL: an explicit --directed/--undirected is persisted; omission reuses the
+        # persisted choice, and with neither, build_merge honors the on-disk graph.
+        _effective_directed = cli_directed if cli_directed is not None else _read_build_dir(graphify_out)
         _write_build_cfg(
             graphify_out,
             excludes=cli_excludes or None,
             gitignore=False if no_gitignore else None,
+            directed=cli_directed,
         )
 
         stages = _StageTimer(cli_timing)
@@ -4492,6 +4502,7 @@ def dispatch_command(cmd: str) -> None:
                     dedup=not no_dedup,
                     dedup_llm_backend=dedup_backend,
                     root=target,
+                    directed=_effective_directed,
                 )
                 _shrink = _handle_unverified_semantic_shrink(
                     G.graph.get("_unverified_semantic_shrink") if hasattr(G, "graph") else None,
@@ -4518,7 +4529,8 @@ def dispatch_command(cmd: str) -> None:
                 print(f"[graphify extract] {exc}", file=sys.stderr)
                 sys.exit(1)
         else:
-            G = _build([merged], dedup=not no_dedup, dedup_llm_backend=dedup_backend, root=target)
+            G = _build([merged], dedup=not no_dedup, dedup_llm_backend=dedup_backend, root=target,
+                       directed=bool(_effective_directed))
         stages.mark("build")
         if G.number_of_nodes() == 0:
             print(

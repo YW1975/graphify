@@ -91,12 +91,13 @@ def _write_build_config(
     *,
     excludes: "list[str] | None",
     gitignore: bool | None = None,
+    directed: bool | None = None,
 ) -> None:
     """Persist corpus-shaping options under ``out_dir``.
 
     Best effort and non clobbering: omitted options retain their existing values.
     """
-    if not excludes and gitignore is None:
+    if not excludes and gitignore is None and directed is None:
         return
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -111,6 +112,8 @@ def _write_build_config(
             config["excludes"] = list(excludes)
         if gitignore is not None:
             config["gitignore"] = gitignore
+        if directed is not None:
+            config["directed"] = directed
         path.write_text(json.dumps(config), encoding="utf-8")
     except OSError:
         pass
@@ -141,6 +144,23 @@ def _read_build_gitignore(out_dir: Path) -> bool:
     except (OSError, json.JSONDecodeError):
         pass
     return True
+
+
+def _read_build_directed(out_dir: Path) -> bool | None:
+    """Return the persisted ``--directed`` choice for this graph, or None if never set.
+
+    Modified by the RLL project (2026-10): `extract --directed` is persisted so a later
+    flag-less extract keeps the graph directed instead of falling back to undirected.
+    """
+    try:
+        path = out_dir / _BUILD_CONFIG_FILENAME
+        if path.is_file():
+            cfg = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(cfg, dict) and isinstance(cfg.get("directed"), bool):
+                return cfg["directed"]
+    except (OSError, json.JSONDecodeError):
+        pass
+    return None
 
 
 def _merge_changed_paths(*sources: "list[Path] | None") -> list[Path]:

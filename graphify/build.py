@@ -881,6 +881,62 @@ def _doc_twin_remap(nodes: list) -> dict[str, str]:
     return remap
 
 
+def _relation_record(attrs: dict) -> dict:
+    """One relation on an edge, with the facts a consumer decides on (RLL, 2026-10).
+
+    A node pair keeps one edge per direction, so when a call and an import meet on the
+    same pair only the winner's attributes survived — an import's ``type_only`` or an
+    edge's ``uncertain`` vanished with it. Each relation now keeps its own record:
+    enum fields plus the evidence location; a short ``reason`` only when uncertain.
+    """
+    rec: dict = {"relation": attrs.get("relation")}
+    if attrs.get("context"):
+        rec["context"] = attrs["context"]
+    uncertain = bool(attrs.get("uncertain")) or attrs.get("confidence") in ("INFERRED", "AMBIGUOUS")
+    rec["certainty"] = "uncertain" if uncertain else "certain"
+    if attrs.get("type_only") is not None:
+        rec["type_only"] = bool(attrs["type_only"])
+    if attrs.get("source_location"):
+        rec["source_location"] = attrs["source_location"]
+    if uncertain and attrs.get("reason"):
+        rec["reason"] = attrs["reason"]
+    return rec
+
+
+def _relation_records(attrs: dict) -> list[dict]:
+    """The records an edge already carries; legacy name-only lists are upgraded in place."""
+    existing = attrs.get("relations")
+    if isinstance(existing, list) and existing:
+        out = []
+        for item in existing:
+            if isinstance(item, dict) and item.get("relation"):
+                out.append(dict(item))
+            elif isinstance(item, str):
+                out.append({"relation": item} if item != attrs.get("relation") else _relation_record(attrs))
+        return out
+    return [_relation_record(attrs)]
+
+
+def _merge_relation_records(a: dict, b: dict) -> list[dict]:
+    """Union of both edges' records, one per (relation, context), deterministic order."""
+    merged: dict = {}
+    for rec in _relation_records(a) + _relation_records(b):
+        key = (rec.get("relation") or "", rec.get("context") or "")
+        if key not in merged:
+            merged[key] = rec
+        else:
+            # Keep a fact either side recorded: uncertainty and type-only-ness are never dropped.
+            cur = merged[key]
+            if rec.get("certainty") == "uncertain":
+                cur["certainty"] = "uncertain"
+                if rec.get("reason") and not cur.get("reason"):
+                    cur["reason"] = rec["reason"]
+            for k in ("type_only", "source_location"):
+                if k not in cur and k in rec:
+                    cur[k] = rec[k]
+    return [merged[k] for k in sorted(merged)]
+
+
 def build_from_json(extraction: dict, *, directed: bool = False, root: str | Path | None = None) -> nx.Graph:
     """Build a NetworkX graph from an extraction dict.
 
@@ -1453,8 +1509,7 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
             existing_rel = existing_attrs.get("relation")
             incoming_rel = attrs.get("relation")
             if existing_rel and incoming_rel and existing_rel != incoming_rel:
-                rels = sorted(set(existing_attrs.get("relations") or [existing_rel])
-                              | set(attrs.get("relations") or [incoming_rel]))
+                rels = _merge_relation_records(existing_attrs, attrs)
                 if existing_rel in _USE_RELATIONS and incoming_rel in _LINK_RELATIONS:
                     existing_attrs["relations"] = rels
                     continue
